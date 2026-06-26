@@ -352,9 +352,95 @@ def _write_video(frames: List[np.ndarray], out: str, fps: int) -> Dict[str, Any]
 # MuJoCo renderer (optional, best-effort)
 # --------------------------------------------------------------------------
 
+# View presets: (azimuth deg, elevation deg). Distance is auto-fit per scene.
+VIEW_PRESETS = {
+    "iso": (45.0, -32.0),
+    "top": (90.0, -89.0),
+    "side": (90.0, -10.0),
+    "follow-ee": (45.0, -28.0),
+}
+
+
+def _scene_bounds(waypoints, scene) -> Dict[str, np.ndarray]:
+    """Bounds over the whole trajectory + towel + markers (for camera auto-fit)."""
+    flat = [waypoints[:, :3]]
+    for c in scene["corners"]:
+        flat.append(np.array([[c[0], c[1], 0.0]]))
+    for key in ("grasp", "place", "crease_a", "crease_b"):
+        p = scene[key]
+        flat.append(np.array([[p[0], p[1], 0.0]]))
+    pts = np.vstack(flat)
+    lo, hi = pts.min(0), pts.max(0)
+    center = 0.5 * (lo + hi)
+    radius = float(np.linalg.norm(hi - center))  # half the 3D diagonal
+    return {"lo": lo, "hi": hi, "center": center, "radius": max(radius, 0.06)}
+
+
+def _make_camera(view, bounds, fovy):
+    import mujoco
+
+    cam = mujoco.MjvCamera()
+    cam.type = mujoco.mjtCamera.mjCAMERA_FREE
+    cam.lookat[:] = bounds["center"]
+    az, el = VIEW_PRESETS.get(view, VIEW_PRESETS["iso"])
+    import math
+
+    # Distance so the scene's diagonal fits the vertical FOV, with margin.
+    fit = bounds["radius"] / max(math.tan(math.radians(fovy) / 2.0), 1e-3)
+    dist = fit * 1.4 + 0.15
+    if view == "follow-ee":
+        dist = max(bounds["radius"] * 2.2, 0.30)
+    cam.azimuth, cam.elevation, cam.distance = az, el, dist
+    return cam, {"azimuth": az, "elevation": el, "distance": dist, "fovy": fovy,
+                 "lookat": bounds["center"].tolist()}
+
+
+def _cam_world_pos(cam_info):
+    import math
+
+    az = math.radians(cam_info["azimuth"])
+    el = math.radians(cam_info["elevation"])
+    fwd = np.array([math.cos(el) * math.cos(az), math.cos(el) * math.sin(az), math.sin(el)])
+    return np.asarray(cam_info["lookat"]) - cam_info["distance"] * fwd
+
+
+def _framing_warning(view, cam_info, bounds) -> Optional[str]:
+    import math
+
+    visible_r = cam_info["distance"] * math.tan(math.radians(cam_info["fovy"]) / 2.0)
+    if bounds["radius"] > visible_r * 1.02:
+        cp = _cam_world_pos(cam_info)
+        return (
+            f"[warn] trajectory may exceed the camera frame (view={view}): "
+            f"traj_radius={bounds['radius']:.3f} > visible_radius={visible_r:.3f}. "
+            f"camera_pos={np.round(cp, 3).tolist()}, target={np.round(cam_info['lookat'], 3).tolist()}, "
+            f"bounds lo={np.round(bounds['lo'], 3).tolist()} hi={np.round(bounds['hi'], 3).tolist()}. "
+            "Try --view top or a larger frame."
+        )
+    return None
+
+
+def _add_trail(scene_obj, pts, max_pts=60, rgba=(0.95, 0.95, 1.0, 0.75)):
+    """Append small spheres tracing the EE path to the render scene."""
+    import mujoco
+
+    if len(pts) == 0:
+        return
+    step = max(1, len(pts) // max_pts)
+    mat = np.eye(3).flatten()
+    size = np.array([0.004, 0.0, 0.0])
+    col = np.array(rgba, dtype=np.float32)
+    for p in pts[::step]:
+        if scene_obj.ngeom >= scene_obj.maxgeom:
+            break
+        g = scene_obj.geoms[scene_obj.ngeom]
+        mujoco.mjv_initGeom(g, mujoco.mjtGeom.mjGEOM_SPHERE, size,
+                            np.ascontiguousarray(p, dtype=np.float64), mat, col)
+        scene_obj.ngeom += 1
+
 
 def _render_mujoco(level, waypoints, gripper, times, phases, scene, w, h, fps, max_seconds, log,
-                   debug_xml_path: Optional[str] = None) -> List[np.ndarray]:
+                   view: str = "iso", debug_xml_path: Optional[str] = None) -> List[np.ndarray]:
     import mujoco  # noqa: F401
 
     ee, grip, ph, duration, n_frames = _timeline(waypoints, gripper, times, phases, fps, max_seconds)
@@ -373,6 +459,16 @@ def _render_mujoco(level, waypoints, gripper, times, phases, scene, w, h, fps, m
             except Exception:
                 hinge_qadr = None
 
+        # Auto-fit a free camera to the whole trajectory + table.
+        bounds = _scene_bounds(waypoints, scene)
+        fovy = float(model.vis.global_.fovy)
+        cam, cam_info = _make_camera(view, bounds, fovy)
+        warn = _framing_warning(view, cam_info, bounds)
+        if warn:
+            log(warn)
+        log(f"   camera: view={view} az={cam_info['azimuth']} el={cam_info['elevation']} "
+            f"dist={cam_info['distance']:.2f} target={np.round(cam_info['lookat'], 3).tolist()}")
+
         frames: List[np.ndarray] = []
         for i in range(n_frames):
             data.mocap_pos[mocap_id] = ee[i]
@@ -383,7 +479,10 @@ def _render_mujoco(level, waypoints, gripper, times, phases, scene, w, h, fps, m
                     mujoco.mj_step(model, data)
             else:
                 mujoco.mj_forward(model, data)
-            renderer.update_scene(data, camera="topcam")
+            if view == "follow-ee":
+                cam.lookat[:] = ee[i]
+            renderer.update_scene(data, camera=cam)
+            _add_trail(renderer.scene, ee[: i + 1])  # EE trail overlay
             frames.append(renderer.render().copy())
         renderer.close()
     except Exception as exc:
@@ -493,21 +592,44 @@ def _build_mjcf(level, scene, ee, w, h) -> str:
     else:
         static_geom = f'<geom name="towel" type="box" pos="{cx} {cy} 0.002" size="{0.5*span} {0.5*span} 0.003" rgba="0.32 0.57 0.57 1"/>'
 
+    ca, cb = scene["crease_a"], scene["crease_b"]
+    cl = max(0.5 * span, 0.05)  # frame-axis length
+    # Debug objects: fold crease line + an RGB frame triad at the towel centre.
+    crease_geom = (
+        f'<geom name="crease" type="capsule" '
+        f'fromto="{float(ca[0])} {float(ca[1])} 0.004 {float(cb[0])} {float(cb[1])} 0.004" '
+        f'size="0.004" rgba="0.95 0.85 0.20 1"/>'
+    )
+    axes_geom = (
+        f'<geom type="capsule" fromto="{cx} {cy} 0.003 {cx + cl} {cy} 0.003" size="0.0025" rgba="0.9 0.25 0.25 1"/>'
+        f'<geom type="capsule" fromto="{cx} {cy} 0.003 {cx} {cy + cl} 0.003" size="0.0025" rgba="0.25 0.8 0.25 1"/>'
+        f'<geom type="capsule" fromto="{cx} {cy} 0.003 {cx} {cy} {0.003 + cl} " size="0.0025" rgba="0.35 0.45 0.95 1"/>'
+    )
     return f"""
 <mujoco model="terafold_fold_sim">
   <option timestep="0.002" gravity="0 0 0" integrator="implicitfast"/>
-  <visual><global offwidth="{w}" offheight="{h}"/></visual>
+  <visual>
+    <global offwidth="{w}" offheight="{h}"/>
+    <headlight ambient="0.55 0.55 0.55" diffuse="0.7 0.7 0.7" specular="0.2 0.2 0.2"/>
+    <rgba haze="0.18 0.19 0.22 1"/>
+    <map shadowclip="2"/>
+  </visual>
+  <asset>
+    <texture name="sky" type="skybox" builtin="gradient" rgb1="0.34 0.36 0.42" rgb2="0.12 0.13 0.16" width="64" height="64"/>
+  </asset>
   {defaults_xml}
   <worldbody>
-    <light pos="{cx} {cy} {cam_z}" dir="0 0 -1" diffuse="0.9 0.9 0.9"/>
-    <camera name="topcam" pos="{cx} {cy - 0.25 * span} {cam_z}" xyaxes="1 0 0 0 0.7 0.72"/>
-    <geom name="table" type="box" pos="{cx} {cy} -0.01" size="{0.9*span} {0.9*span} 0.01" rgba="0.5 0.5 0.55 1"/>
+    <light name="key" pos="{cx + span} {cy - span} {cam_z}" dir="-1 1 -2" diffuse="0.6 0.6 0.6" directional="true"/>
+    <light name="fill" pos="{cx - span} {cy + span} {cam_z}" dir="1 -1 -2" diffuse="0.4 0.4 0.4" directional="true"/>
+    <geom name="table" type="box" pos="{cx} {cy} -0.01" size="{1.0*span} {1.0*span} 0.01" rgba="0.55 0.56 0.6 1"/>
     {static_geom}
     {cloth_moving}
-    <geom name="grasp" type="sphere" pos="{gx} {gy} 0.006" size="0.01" rgba="1 0.55 0.1 1"/>
-    <geom name="place" type="sphere" pos="{px} {py} 0.006" size="0.01" rgba="0.1 0.8 0.8 1"/>
+    {crease_geom}
+    {axes_geom}
+    <geom name="grasp" type="sphere" pos="{gx} {gy} 0.008" size="0.012" rgba="1 0.55 0.1 1"/>
+    <geom name="place" type="sphere" pos="{px} {py} 0.008" size="0.012" rgba="0.1 0.8 0.85 1"/>
     <body name="ee" mocap="true" pos="{float(ee[0,0])} {float(ee[0,1])} {z0}">
-      <geom name="ee_sphere" type="sphere" size="0.013" rgba="0.9 0.2 0.18 1"/>
+      <geom name="ee_sphere" type="sphere" size="0.016" rgba="0.95 0.2 0.18 1"/>
     </body>{arm_xml}
   </worldbody>
   {weld_xml}
@@ -550,6 +672,7 @@ def run_sim_fold(
     width: int = 640,
     height: int = 480,
     use_mujoco: bool = False,
+    view: str = "iso",
     on_log=print,
 ) -> Dict[str, Any]:
     """Render a fold simulation video from a TeraFold plan JSON. Returns metadata."""
@@ -577,7 +700,8 @@ def run_sim_fold(
             debug_xml = os.path.splitext(out)[0] + ".mjcf.xml"
             try:
                 frames = _render_mujoco(level, waypoints, gripper, times, phases, scene,
-                                        width, height, fps, max_seconds, log, debug_xml_path=debug_xml)
+                                        width, height, fps, max_seconds, log, view=view,
+                                        debug_xml_path=debug_xml)
                 renderer = "mujoco"
             except Exception as exc:
                 render_error = str(exc)
@@ -602,6 +726,7 @@ def run_sim_fold(
     meta = {
         "status": "ok",
         "level": level,
+        "view": view,
         "renderer": renderer,
         "out": video.get("video") or video.get("frames_dir"),
         "video": video.get("video"),

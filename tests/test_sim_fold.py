@@ -156,3 +156,62 @@ def test_arm_ik_mjcf_compiles_in_mujoco(tmp_path):
         bid = model.body(name).id
         assert model.body_mass[bid] > 1e-6, f"{name} compiled mass must be > 0"
         assert np.all(model.body_inertia[bid] > 0.0), f"{name} compiled inertia must be > 0"
+
+
+# -------------------- camera / framing / visibility --------------------
+
+
+def test_framing_warning_when_trajectory_out_of_bounds():
+    from terafold.sim.fold_sim import _framing_warning
+
+    cam_info = {"azimuth": 45, "elevation": -30, "distance": 0.1, "fovy": 45, "lookat": [0, 0, 0]}
+    bounds = {"lo": np.array([-1.0, -1.0, 0.0]), "hi": np.array([1.0, 1.0, 0.0]),
+              "center": np.zeros(3), "radius": 2.0}
+    warn = _framing_warning("iso", cam_info, bounds)
+    assert warn is not None
+    for token in ("camera_pos", "target", "bounds"):
+        assert token in warn
+
+
+def test_no_framing_warning_when_fit():
+    from terafold.sim.fold_sim import _framing_warning
+
+    cam_info = {"azimuth": 45, "elevation": -30, "distance": 2.0, "fovy": 45, "lookat": [0, 0, 0]}
+    bounds = {"lo": np.array([-0.1, -0.1, 0.0]), "hi": np.array([0.1, 0.1, 0.0]),
+              "center": np.zeros(3), "radius": 0.15}
+    assert _framing_warning("iso", cam_info, bounds) is None
+
+
+def test_scene_bounds_cover_trajectory(tmp_path):
+    from terafold.sim.fold_sim import _scene_bounds, load_plan, parse_trajectory
+
+    path, _ = _plan_json(tmp_path)
+    wp, _, _, _, scene = parse_trajectory(load_plan(path))
+    b = _scene_bounds(wp, scene)
+    assert np.all(b["lo"] <= wp[:, :3].min(0) + 1e-9)
+    assert np.all(b["hi"] >= wp[:, :3].max(0) - 1e-9)
+    assert b["radius"] > 0
+
+
+@pytest.mark.parametrize("view", ["iso", "top", "side"])
+def test_arm_ik_view_renders_visible_frames(tmp_path, view):
+    pytest.importorskip("mujoco")
+    from terafold.sim.fold_sim import run_sim_fold
+
+    path, _ = _plan_json(tmp_path)
+    out = str(tmp_path / f"arm_{view}.gif")
+    m = run_sim_fold(path, out=out, level="arm-ik", view=view, fps=6, max_seconds=1.2,
+                     on_log=lambda x: None)
+    if m["status"] == "error":  # no GL context (headless CI) — not an MJCF bug
+        pytest.skip(f"mujoco render unavailable: {str(m.get('error'))[:60]}")
+    assert m["status"] == "ok" and m["renderer"] == "mujoco" and m["view"] == view
+
+    import imageio.v2 as iio
+
+    frames = list(iio.get_reader(out))
+    assert len(frames) > 0
+    arr = np.asarray(frames[len(frames) // 2])[:, :, :3]
+    # Non-empty AND visible: not near-black, and actually has structure.
+    assert arr.mean() > 20, f"{view} frame too dark (mean={arr.mean():.1f})"
+    assert arr.max() > 60, f"{view} frame has no bright content"
+    assert arr.std() > 10, f"{view} frame is a flat fill (std={arr.std():.1f})"

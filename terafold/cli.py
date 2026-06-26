@@ -1003,6 +1003,7 @@ def sim_fold_cmd(
     plan_json: str = typer.Option(..., help="A FoldPlan / demo result JSON."),
     out: str = typer.Option("runs/sim/fold_demo.mp4", help="Output video (.mp4 / .gif)."),
     level: str = typer.Option("ee-only", help="ee-only | arm-ik | cloth-proxy."),
+    view: str = typer.Option("iso", help="Camera (MuJoCo): top | iso | side | follow-ee."),
     fps: int = typer.Option(20),
     max_seconds: float = typer.Option(10.0, help="Cap the (time-compressed) video length."),
     width: int = typer.Option(640),
@@ -1017,7 +1018,7 @@ def sim_fold_cmd(
     from terafold.sim.fold_sim import run_sim_fold
 
     res = run_sim_fold(
-        plan_json, out=out, level=level, fps=fps, max_seconds=max_seconds,
+        plan_json, out=out, level=level, view=view, fps=fps, max_seconds=max_seconds,
         width=width, height=height, use_mujoco=use_mujoco, on_log=_echo,
     )
     status = res.get("status")

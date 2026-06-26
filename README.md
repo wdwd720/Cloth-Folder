@@ -250,8 +250,21 @@ python3 -m terafold sim-fold --plan-json runs/demo_image/claude_result.json --le
     --out runs/sim/fold_ee.mp4
 python3 -m terafold sim-fold --plan-json runs/demo_image/claude_result.json --level cloth-proxy \
     --out runs/sim/fold_cloth_proxy.mp4
-open runs/sim/fold_ee.mp4
+
+# Virtual SO-101 arm (MuJoCo) with camera presets:
+python3 -m terafold sim-fold --plan-json runs/demo_image/claude_result.json --level arm-ik \
+    --view iso --out runs/sim/fold_arm_iso.mp4
+python3 -m terafold sim-fold --plan-json runs/demo_image/claude_result.json --level arm-ik \
+    --view top --out runs/sim/fold_arm_top.mp4
+open runs/sim/fold_arm_iso.mp4
 ```
+
+The MuJoCo scene uses a free camera **auto-fit** to the trajectory + table (with a
+headlight + skybox so nothing is black) and draws debug objects: towel rectangle,
+yellow fold crease, grasp/place markers, an EE trail, and an RGB frame triad.
+`--view` presets: `iso` (default), `top`, `side`, `follow-ee`. If the trajectory
+would fall outside the frame, a warning prints the camera position, target, and
+bounds.
 
 Levels:
 - `ee-only` (default) — end-effector sphere follows the path; **always works**
