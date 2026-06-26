@@ -49,15 +49,17 @@ def test_motion_gate_requires_both_flags(tmp_path):
     assert res["real_motion"] is False and res["dry_run"] is True
 
 
-def test_real_motion_gracefully_unavailable(tmp_path):
-    # Both flags + real robot, but bring-up isn't wired / lerobot missing.
+def test_real_motion_refused_without_requirements(tmp_path):
+    # Both flags + real robot, but no calibration / verified adapter / dry-run done.
     res = run_demo_today(
         task_path=TASK, camera="mock", robot="so101", mode="markers",
         dry_run=False, enable_motion=True, acknowledge=True, out=str(tmp_path / "ep"),
     )
-    assert res["real_motion"] is True
-    assert res["status"] == "real_robot_unavailable"
+    assert res["requested_motion"] is True
+    assert res["real_motion"] is False  # refused
+    assert res["status"] == "real_motion_refused"
     assert res["executed_actions"] == 0  # nothing moved
+    assert any("calibrat" in m for m in res["missing"])
 
 
 def test_camera_fallback_to_mock(tmp_path):

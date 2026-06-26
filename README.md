@@ -178,8 +178,55 @@ Safety is layered: slow speed + workspace bounds (from the task config), a
 validated against the workspace before any motion, and the run is saved as an
 episode (frames, observations, actions, plan, safety, result) with an overlay
 image. `--mode markers` uses the colored fiducials (falling back to the classical
-detector if markers aren't all visible); `--mode keypoints` uses the learned
-model (`--checkpoint`).
+detector if markers aren't all visible); `--mode model` uses the learned model
+(`--checkpoint`); `--mode claude` uses Claude Vision (geometry only).
+
+### Phone-camera / image / unknown-arm path (no robot camera needed)
+
+For a non-SO-101 arm with no robot-mounted camera, the demo runs off a phone
+webcam, a Continuity/USB camera, **or a single top-down photo**:
+
+```bash
+# 0. Find a working camera index (phone webcam / Continuity / USB):
+terafold list-cameras --max-index 8 --out runs/camera_scan
+
+# 1a. Take a photo from above and feed the file (markers / model / claude):
+terafold demo-image --image towel.jpg --mode markers \
+    --overlay-out runs/demo_image/overlay.png --save-json runs/demo_image/result.json
+#   --mode model --checkpoint runs/keypoints_v0/model.pt
+#   --mode claude   (needs:  export ANTHROPIC_API_KEY=... ; pip install anthropic)
+
+# 1b. ...or go live from the chosen index:
+terafold demo-today --camera-index 1 --mode markers --dry-run \
+    --save-frame runs/demo_today/frame.png --overlay-out runs/demo_today/overlay.png \
+    --save-json runs/demo_today/result.json --confidence-threshold 0.70
+
+# 2. Map image pixels to table coordinates (required for real motion):
+terafold calibrate-table-from-image --image calib.jpg --out data/calib/homography.json \
+    --image-points "u1,v1;u2,v2;u3,v3;u4,v4" --table-points "0,0;0.3,0;0.3,0.3;0,0.3"
+
+# 3. Identify the arm (NEVER sends motor commands) and fill in the worksheet:
+terafold robot-scan --save-json runs/robot_scan/ports.json
+terafold robot-info-template --out runs/robot_scan/robot_info_template.md
+
+# 4. Export the trajectory to drive the arm via vendor software / a future adapter:
+terafold export-trajectory --plan-json runs/demo_image/result.json \
+    --out runs/demo_today/trajectory.csv
+```
+
+**Marker convention** (configurable with `--marker-map`): `red → top_left`,
+`blue → top_right`, `green → bottom_left`, `orange/yellow → bottom_right`. HSV
+blob detection reports exactly which colors are missing; if markers aren't all
+found it does **not** pretend (`perception = marker_failed_fallback_classical`)
+and real motion is refused. `--debug-markers` saves per-color masks.
+
+**Real motion requires ALL of**: trusted perception above
+`--confidence-threshold`, a calibrated homography, a known adapter with a
+verified command backend, a workspace-valid trajectory, a completed dry-run
+episode, and both `--enable-motion --i-understand-this-moves-hardware`. Any
+missing requirement is listed and real motion is refused — overlay / JSON / plan
+are still saved. (`GenericArmAdapter` is a dry-run-only safe shell for an
+unidentified arm; it refuses real motion until a verified backend is wired.)
 
 ## 14. Record real demos
 

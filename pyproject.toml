@@ -55,6 +55,14 @@ video = [
     "imageio>=2.31",
     "imageio-ffmpeg>=0.4",
 ]
+# Claude Vision keypoint labeling (--mode claude). Needs ANTHROPIC_API_KEY.
+claude = [
+    "anthropic>=0.40",
+]
+# Serial port discovery for robot-scan (richer metadata than device-node globbing).
+robot = [
+    "pyserial>=3.5",
+]
 # Plotting / debug visualization.
 viz = [
     "matplotlib>=3.7",

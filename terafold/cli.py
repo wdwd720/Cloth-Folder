@@ -391,27 +391,85 @@ def dry_run_fold(
 # --------------------------------------------------------------------------
 
 
+@app.command("list-cameras")
+def list_cameras_cmd(
+    max_index: int = typer.Option(8, help="Scan camera indices 0..max-index."),
+    out: Optional[str] = typer.Option(None, help="Save snapshots here (camera_<i>.png)."),
+    preview_seconds: float = typer.Option(0.0, help="Briefly show each working feed."),
+):
+    """Scan camera indices and report which are usable (phone/Continuity/USB webcam)."""
+    from terafold.camera.discovery import scan_cameras
+
+    report = scan_cameras(max_index=max_index, out=out, preview_seconds=preview_seconds)
+    if not report.get("cv2", True) and not report.get("available", False):
+        _err(report.get("hint", "OpenCV not available."))
+        raise typer.Exit(1)
+    for cam in report["cameras"]:
+        if not cam["opened"]:
+            _echo(f"  [{cam['index']}] not opened ({cam.get('error')})")
+            continue
+        tag = "USABLE" if cam["usable"] else "marginal"
+        _echo(
+            f"  [{cam['index']}] {tag}  {cam['width']}x{cam['height']}  "
+            f"brightness={cam['brightness']:.0f}  sharpness={cam['blur']:.0f}"
+            + (f"  -> {cam['snapshot_path']}" if cam.get("snapshot_path") else "")
+        )
+    _ok(f"Usable camera indices: {report.get('usable_indices', [])}")
+
+
+@app.command("demo-image")
+def demo_image_cmd(
+    image: str = typer.Option(..., help="Input image path (top-down photo)."),
+    mode: str = typer.Option("markers", help="markers | model | claude."),
+    task: str = typer.Option("configs/task_fold_towel_half.yaml"),
+    checkpoint: Optional[str] = typer.Option(None, help="Keypoint model checkpoint (mode=model)."),
+    calibration: Optional[str] = typer.Option(None, help="Homography JSON (mode metric)."),
+    homography: Optional[str] = typer.Option(None, help="Alias of --calibration."),
+    marker_map: Optional[str] = typer.Option(None, help="e.g. red:top_left,blue:top_right,..."),
+    debug_markers: bool = typer.Option(False, "--debug-markers", help="Save per-color masks."),
+    overlay_out: Optional[str] = typer.Option(None, help="Overlay image output path."),
+    save_json: Optional[str] = typer.Option(None, help="JSON result output path."),
+    confidence_threshold: float = typer.Option(0.70),
+):
+    """Perceive a still image, plan the fold, save an overlay + JSON result."""
+    from terafold.demo import run_demo_image
+
+    res = run_demo_image(
+        image_path=image, mode=mode, task_path=task, checkpoint=checkpoint,
+        calibration=calibration or homography, marker_map=marker_map, debug_markers=debug_markers,
+        overlay_out=overlay_out, save_json=save_json, confidence_threshold=confidence_threshold,
+        on_log=_echo,
+    )
+    _ok(f"demo-image complete (perception={res['perception']}, conf={res['confidence']:.2f}).")
+
+
 @app.command("demo-today")
 def demo_today_cmd(
-    camera_index: int = typer.Option(0, help="Webcam index (real camera)."),
+    camera_index: int = typer.Option(0, help="Webcam index (from list-cameras)."),
     camera: str = typer.Option("opencv", help="opencv | mock (mock renders a marked towel)."),
-    mode: str = typer.Option("markers", help="markers | keypoints | auto."),
+    mode: str = typer.Option("markers", help="markers | model | claude."),
     task: str = typer.Option("configs/task_fold_towel_half.yaml"),
-    robot: str = typer.Option("mock", help="mock | so101 | learm."),
-    checkpoint: Optional[str] = typer.Option(None, help="Keypoint model checkpoint (mode=keypoints)."),
+    robot: str = typer.Option("mock", help="mock | generic | so101 | learm."),
+    checkpoint: Optional[str] = typer.Option(None, help="Keypoint model checkpoint (mode=model)."),
     calibration: Optional[str] = typer.Option(None, help="Homography JSON for metric planning."),
     out: Optional[str] = typer.Option(None, help="Episodes root (default data/episodes/<task>_demo)."),
     overlay_out: Optional[str] = typer.Option(None, help="Overlay image path."),
+    save_frame: Optional[str] = typer.Option(None, help="Save the captured frame here."),
+    save_json: Optional[str] = typer.Option(None, help="Save the JSON result here."),
+    marker_map: Optional[str] = typer.Option(None, help="e.g. red:top_left,blue:top_right,..."),
+    debug_markers: bool = typer.Option(False, "--debug-markers", help="Save per-color masks."),
+    confidence_threshold: float = typer.Option(0.70),
     dry_run: bool = typer.Option(False, "--dry-run/--no-dry-run", help="Force dry-run (no motion)."),
     enable_motion: bool = typer.Option(False, "--enable-motion", help="Allow physical motion."),
     i_understand: bool = typer.Option(
         False, "--i-understand-this-moves-hardware", help="Required second motion flag."
     ),
 ):
-    """One-shot real-world towel half-fold demo: camera -> perceive -> plan -> dry-run/execute.
+    """Live demo: camera -> perceive -> plan -> dry-run / refuse real motion -> record.
 
-    Safe by default (dry-run). Real motion needs:
-    --robot so101 --enable-motion --i-understand-this-moves-hardware
+    Safe by default (dry-run). Real motion needs ALL of: trusted perception above
+    --confidence-threshold, a calibration, a verified adapter, a prior dry-run,
+    --robot so101 --enable-motion --i-understand-this-moves-hardware.
     """
     from terafold.demo import run_demo_today
 
@@ -419,8 +477,9 @@ def demo_today_cmd(
         res = run_demo_today(
             task_path=task, camera=camera, camera_index=camera_index, mode=mode, robot=robot,
             checkpoint=checkpoint, calibration=calibration, out=out, overlay_out=overlay_out,
-            dry_run=dry_run, enable_motion=enable_motion, acknowledge=i_understand,
-            on_log=_echo,
+            save_frame=save_frame, save_json=save_json, marker_map=marker_map,
+            debug_markers=debug_markers, confidence_threshold=confidence_threshold,
+            dry_run=dry_run, enable_motion=enable_motion, acknowledge=i_understand, on_log=_echo,
         )
     except Exception as exc:
         from terafold.robot.safety import SafetyError
@@ -434,18 +493,115 @@ def demo_today_cmd(
     status = res.get("status")
     if status == "ok":
         _ok(f"demo-today complete ({'REAL' if res.get('real_motion') else 'dry-run'}).")
+    elif status == "real_motion_refused":
+        _err("Real motion refused — unmet requirements:")
+        for m in res.get("missing", []):
+            _echo(f"   - {m}")
+        _echo("Dry-run plan + overlay + JSON + episode were still saved.")
     elif status == "real_robot_unavailable":
-        _err(f"Real {robot} bring-up unavailable: {res.get('robot_error')}")
-        _echo("Dry-run plan + overlay + episode were still saved.")
+        _err(f"Robot bring-up unavailable: {res.get('robot_error')}")
     elif status == "aborted":
         _err(f"Aborted: {res.get('stop_reason')}")
-    else:
-        _err(f"Status: {status}: {res.get('error')}")
+    elif status == "error":
+        _err(f"Error: {res.get('error')}")
         raise typer.Exit(1)
     if res.get("episode_dir"):
         _echo(f"  episode : {res['episode_dir']}")
     if res.get("overlay_path"):
         _echo(f"  overlay : {res['overlay_path']}")
+    if res.get("json_path"):
+        _echo(f"  json    : {res['json_path']}")
+
+
+@app.command("robot-scan")
+def robot_scan_cmd(
+    probe_readonly: bool = typer.Option(False, "--probe-readonly", help="Open ports and READ only."),
+    save_json: Optional[str] = typer.Option(None, help="Save the port report JSON here."),
+):
+    """List likely serial ports for an unknown arm. NEVER sends motor commands."""
+    from terafold.robot.discovery import scan_serial_ports
+
+    report = scan_serial_ports(probe_readonly=probe_readonly)
+    if not report["ports"]:
+        _echo("No serial ports found. Plug the arm in (and install vendor drivers).")
+    for p in report["ports"]:
+        flag = " <-- likely robot" if p["likely_robot"] else ""
+        _echo(f"  {p['device']}  {p.get('description') or ''}{flag}")
+        if p.get("probe"):
+            _echo(f"      probe: {p['probe']}")
+    _echo("\nRecommended next steps:")
+    for step in report["next_steps"]:
+        _echo(f"  - {step}")
+    _echo(f"\n{report['note']}")
+    if save_json:
+        from terafold.data.episode_schema import write_json
+
+        write_json(save_json, report)
+        _ok(f"Saved -> {save_json}")
+
+
+@app.command("robot-info-template")
+def robot_info_template_cmd(
+    out: str = typer.Option("runs/robot_scan/robot_info_template.md"),
+):
+    """Write a fill-in checklist to identify and safely wire your arm."""
+    import os
+
+    from terafold.robot.discovery import robot_info_template_markdown
+
+    os.makedirs(os.path.dirname(os.path.abspath(out)) or ".", exist_ok=True)
+    with open(out, "w") as f:
+        f.write(robot_info_template_markdown())
+    _ok(f"Wrote robot info template -> {out}")
+
+
+@app.command("export-trajectory")
+def export_trajectory_cmd(
+    plan_json: str = typer.Option(..., help="A FoldPlan / demo result JSON."),
+    out: str = typer.Option(..., help="Output CSV (or .json)."),
+    fmt: str = typer.Option("csv", help="csv | json"),
+):
+    """Export a planned trajectory to CSV/JSON for manual / vendor-software testing."""
+    from terafold.data.trajectory_export import export_trajectory
+
+    res = export_trajectory(plan_json, out, fmt=fmt)
+    _ok(f"Exported {res['rows']} waypoints -> {res['out']} ({res['format']})")
+
+
+@app.command("calibrate-table-from-image")
+def calibrate_table_from_image_cmd(
+    image: str = typer.Option(..., help="Calibration image (for reference)."),
+    out: str = typer.Option("data/calib/homography.json"),
+    image_points: Optional[str] = typer.Option(
+        None, help="4+ pixel pts 'u1,v1;u2,v2;...' (else read --points-json)."
+    ),
+    table_points: Optional[str] = typer.Option(
+        None, help="4+ table metres 'x1,y1;x2,y2;...'."
+    ),
+    points_json: Optional[str] = typer.Option(
+        None, help="JSON file with {image_pts:[...], table_pts:[...]}."
+    ),
+):
+    """Solve + save the image->table homography from manual point correspondences."""
+    from terafold.camera.table_calibration import calibrate_table_from_image, parse_xy_list
+
+    if points_json:
+        from terafold.data.episode_schema import read_json
+
+        d = read_json(points_json)
+        img_pts, tbl_pts = d["image_pts"], d["table_pts"]
+    elif image_points and table_points:
+        img_pts, tbl_pts = parse_xy_list(image_points), parse_xy_list(table_points)
+    else:
+        _err("Provide --image-points and --table-points, or --points-json.")
+        raise typer.Exit(1)
+
+    try:
+        res = calibrate_table_from_image(img_pts, tbl_pts, out, image_path=image)
+    except Exception as exc:
+        _err(f"Calibration failed: {exc}")
+        raise typer.Exit(1)
+    _ok(f"Saved homography -> {res['out']}  (reprojection error {res['reprojection_error_m']:.4f} m)")
 
 
 @app.command("record-demo")
