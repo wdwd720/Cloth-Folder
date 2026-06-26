@@ -1,0 +1,38 @@
+# LeArm 6-DoF serial arm TEMPLATE.
+# Keys MUST match terafold.config.schema.RobotConfig (extra='forbid').
+#
+# SAFETY: this is a template only. Real motion is BLOCKED until you provide a
+# working protocol file:
+#   1. Set `protocol_file` below to a Python module/file that implements the
+#      LeArm serial encoding (encode_joint_command / _send_serial). The shipped
+#      LeArmAdapter intentionally raises NotImplementedError so no invented
+#      vendor bytes are ever sent.
+#   2. Set the correct serial `port` (e.g. /dev/tty.usbserial-XXXX) and baudrate.
+#   3. Only then run with --enable-motion --i-understand-this-moves-hardware.
+# With dry_run_default: true (the default) connect() never opens a serial port.
+type: learm
+name: learm_arm
+dof: 6
+
+port: null            # e.g. /dev/tty.usbserial-XXXX  (leave null for dry-run)
+baudrate: 9600
+protocol_file: null   # REQUIRED before real motion; see safety note above
+
+max_speed_mps: 0.04
+max_accel_mps2: 0.10
+gripper_open_pos: 1.0
+gripper_close_pos: 0.0
+home_pose: null
+
+dry_run_default: true
+workspace:
+  frame: table
+  x_min_m: 0.0
+  x_max_m: 0.70
+  y_min_m: 0.0
+  y_max_m: 0.50
+  z_min_m: 0.0
+  z_max_m: 0.25
+forbidden_zones: []
+max_z_m: 0.25
+min_z_m: 0.0

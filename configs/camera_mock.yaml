@@ -1,0 +1,11 @@
+# Mock camera: renders synthetic towel scenes (numpy only) for dry-run dev.
+# Keys MUST match terafold.config.schema.CameraConfig (extra='forbid').
+type: mock
+index: 0
+width: 640
+height: 480
+fps: 30
+calibration_file: null
+mock_render_cloth: true
+flip_horizontal: false
+flip_vertical: false

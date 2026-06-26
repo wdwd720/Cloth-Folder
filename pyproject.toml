@@ -1,0 +1,78 @@
+[build-system]
+requires = ["setuptools>=68", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "terafold"
+version = "0.0.1"
+description = "TeraFold: a trainable, physically-grounded cloth-folding robot stack (hybrid geometry + learning)."
+readme = "README.md"
+requires-python = ">=3.10"
+license = { text = "Apache-2.0" }
+authors = [{ name = "TeraFold" }]
+keywords = ["robotics", "manipulation", "cloth-folding", "imitation-learning", "lerobot", "robot-learning"]
+
+# Core dependencies are intentionally LIGHT. The full Stage-0 pipeline
+# (synthetic data -> tests -> mock dry-run -> episode recording -> export)
+# must run with these alone. Heavy/optional deps live in extras and are
+# lazy-imported so the repo never hard-fails when they are absent.
+dependencies = [
+    "numpy>=1.24",
+    "scipy>=1.10",
+    "pyyaml>=6.0",
+    "typer>=0.9",
+    "pydantic>=2.0",
+]
+
+[project.optional-dependencies]
+# Deep learning (keypoint / success / residual model training + ACT/SmolVLA).
+ml = [
+    "torch>=2.1",
+    "torchvision>=0.16",
+]
+# Alias so the guidance printed by modules (`pip install -e '.[torch]'`) works too.
+torch = [
+    "terafold[ml]",
+]
+# Real cameras + image codecs for live operation.
+vision = [
+    "opencv-python>=4.8",
+    "pillow>=10.0",
+]
+# LeRobot ecosystem + HuggingFace dataset tooling.
+lerobot = [
+    "lerobot",
+    "huggingface_hub>=0.20",
+    "datasets>=2.16",
+]
+# Plotting / debug visualization.
+viz = [
+    "matplotlib>=3.7",
+]
+dev = [
+    "pytest>=7.4",
+    "pytest-cov>=4.1",
+    "ruff>=0.1",
+]
+# Everything (best-effort; some wheels are platform specific).
+all = [
+    "terafold[ml,vision,lerobot,viz,dev]",
+]
+
+[project.scripts]
+terafold = "terafold.cli:app"
+
+[tool.setuptools.packages.find]
+include = ["terafold*"]
+
+[tool.setuptools.package-data]
+terafold = ["py.typed"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+addopts = "-q"
+filterwarnings = ["ignore::DeprecationWarning"]
+
+[tool.ruff]
+line-length = 100
+target-version = "py310"

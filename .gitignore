@@ -1,0 +1,40 @@
+# Python
+__pycache__/
+*.py[cod]
+*.egg-info/
+*.egg
+.eggs/
+build/
+dist/
+.pytest_cache/
+.ruff_cache/
+.mypy_cache/
+.coverage
+htmlcov/
+
+# Virtual environments
+.venv/
+venv/
+env/
+
+# TeraFold runtime artifacts (large / regenerable — never commit)
+data/synth_v0/
+data/synth*/
+data/episodes/
+data/lerobot/
+data/calib/
+data/fold_pairs/
+runs/
+*.pt
+*.ckpt
+*.safetensors
+*.mp4
+
+# OS / editor
+.DS_Store
+.idea/
+.vscode/
+*.swp
+
+# Keep small sample/config assets if explicitly added with `git add -f`
+!configs/*.yaml

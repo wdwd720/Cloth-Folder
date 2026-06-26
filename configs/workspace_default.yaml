@@ -1,0 +1,9 @@
+# Standalone default workspace bounds (table frame, metres).
+# Keys MUST match terafold.config.schema.WorkspaceConfig.
+frame: table
+x_min_m: 0.0
+x_max_m: 0.70
+y_min_m: 0.0
+y_max_m: 0.50
+z_min_m: 0.0
+z_max_m: 0.25

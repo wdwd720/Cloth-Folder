@@ -1,0 +1,32 @@
+# SO-101 arm TEMPLATE (driven via LeRobot).
+# Keys MUST match terafold.config.schema.RobotConfig (extra='forbid').
+#
+# Real control requires LeRobot installed:  pip install -e '.[lerobot]'
+# The SO101Adapter lazily imports lerobot; with dry_run_default: true the
+# module/adapter import cleanly even when lerobot is absent.
+type: so101
+name: so101_arm
+dof: 6
+
+port: null            # e.g. /dev/tty.usbmodemXXXX  (leave null for dry-run)
+baudrate: 1000000
+protocol_file: null
+
+max_speed_mps: 0.04
+max_accel_mps2: 0.10
+gripper_open_pos: 1.0
+gripper_close_pos: 0.0
+home_pose: null
+
+dry_run_default: true
+workspace:
+  frame: table
+  x_min_m: 0.0
+  x_max_m: 0.70
+  y_min_m: 0.0
+  y_max_m: 0.50
+  z_min_m: 0.0
+  z_max_m: 0.25
+forbidden_zones: []
+max_z_m: 0.25
+min_z_m: 0.0

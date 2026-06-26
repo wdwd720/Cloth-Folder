@@ -1,0 +1,11 @@
+# USB / built-in webcam via OpenCV (lazy cv2 import in OpenCVCamera).
+# Keys MUST match terafold.config.schema.CameraConfig (extra='forbid').
+type: opencv
+index: 0
+width: 640
+height: 480
+fps: 30
+calibration_file: null   # set to a homography.json after calibration
+mock_render_cloth: false
+flip_horizontal: false
+flip_vertical: false

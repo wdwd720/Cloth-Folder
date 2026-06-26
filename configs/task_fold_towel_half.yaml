@@ -1,0 +1,49 @@
+# Stage-0 reference task: fold a small towel in half, right to left.
+# Keys MUST match terafold.config.schema.TaskConfig (extra='forbid').
+task_name: fold_towel_half_right_to_left
+instruction: fold the small towel in half from right to left
+
+cloth:
+  type: small_towel
+  expected_width_m: 0.30
+  expected_height_m: 0.30
+  thickness_m: 0.003
+  stiffness_hint: medium
+  friction_hint: medium
+  allow_rotation_deg: 25
+
+fold:
+  direction: right_to_left
+  crease: vertical_center
+  grasp_strategy: right_edge_midpoint
+  place_strategy: reflect_across_crease
+  lift_height_m: 0.045
+  arc_height_m: 0.080
+  release_height_m: 0.012
+  num_waypoints: 12
+  slip_compensation_m: 0.010
+
+workspace:
+  frame: table
+  x_min_m: 0.0
+  x_max_m: 0.70
+  y_min_m: 0.0
+  y_max_m: 0.50
+  z_min_m: 0.0
+  z_max_m: 0.25
+
+robot:
+  max_speed_mps: 0.04
+  max_accel_mps2: 0.10
+  dry_run_default: true
+
+success:
+  max_corner_error_m: 0.05
+  min_overlap_ratio: 0.70
+  max_wrinkle_score: 0.35
+  min_visible_area_ratio: 0.45
+
+learning:
+  use_keypoint_model: true
+  use_residual_model: false
+  residual_checkpoint: null

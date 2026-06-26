@@ -1,0 +1,23 @@
+# Mock robot: pure-numpy simulated arm for Stage-0 dry-run development.
+# Keys MUST match terafold.config.schema.RobotConfig (extra='forbid').
+type: mock
+name: mock_robot
+dof: 6
+
+max_speed_mps: 0.04
+max_accel_mps2: 0.10
+gripper_open_pos: 1.0
+gripper_close_pos: 0.0
+
+dry_run_default: true
+workspace:
+  frame: table
+  x_min_m: 0.0
+  x_max_m: 0.70
+  y_min_m: 0.0
+  y_max_m: 0.50
+  z_min_m: 0.0
+  z_max_m: 0.25
+forbidden_zones: []
+max_z_m: 0.25
+min_z_m: 0.0
