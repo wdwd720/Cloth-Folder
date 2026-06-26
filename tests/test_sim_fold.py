@@ -215,3 +215,111 @@ def test_arm_ik_view_renders_visible_frames(tmp_path, view):
     assert arr.mean() > 20, f"{view} frame too dark (mean={arr.mean():.1f})"
     assert arr.max() > 60, f"{view} frame has no bright content"
     assert arr.std() > 10, f"{view} frame is a flat fill (std={arr.std():.1f})"
+
+
+# -------------------- SO-101 realistic arm (so101-real) --------------------
+
+
+def test_find_so101_assets_returns_report():
+    from terafold.sim.so101 import find_so101_assets
+
+    rep = find_so101_assets()
+    assert {"found", "type", "path", "searched", "note"}.issubset(rep)
+    assert isinstance(rep["searched"], list) and rep["searched"]
+    assert isinstance(rep["found"], bool)
+
+
+def test_so101_mjcf_valid_masses_and_gripper_actuators(tmp_path):
+    mujoco = pytest.importorskip("mujoco")
+    from terafold.sim import so101
+    from terafold.sim.fold_sim import _build_mjcf, load_plan, parse_trajectory
+
+    path, _ = _plan_json(tmp_path)
+    wp, _, _, _, scene = parse_trajectory(load_plan(path))
+    model = mujoco.MjModel.from_xml_string(_build_mjcf("so101-real", scene, wp, 320, 240))
+    for name in so101.SO101_BODIES:
+        bid = model.body(name).id
+        assert model.body_mass[bid] > 1e-6, f"{name} mass must be > 0"
+        assert np.all(model.body_inertia[bid] > 0.0), f"{name} inertia must be > 0"
+    assert model.nu >= 2  # two parallel-gripper actuators
+    for a in so101.SO101_GRIPPER_ACTUATORS:
+        assert model.actuator(a).id >= 0
+
+
+def test_so101_real_requires_mujoco_message(tmp_path, monkeypatch):
+    import terafold.sim.fold_sim as sim
+
+    monkeypatch.setattr(sim, "have_mujoco", lambda: False)
+    path, _ = _plan_json(tmp_path)
+    m = sim.run_sim_fold(path, out=str(tmp_path / "x.gif"), level="so101-real", on_log=lambda x: None)
+    assert m["status"] == "missing_dependency"
+    assert 'pip install -e ".[sim]"' in m["install_command"]
+
+
+def test_so101_real_renders_and_sends_no_motor_commands(tmp_path):
+    pytest.importorskip("mujoco")
+    from terafold.sim.fold_sim import run_sim_fold
+
+    path, _ = _plan_json(tmp_path)
+    out = str(tmp_path / "so101.gif")
+    m = run_sim_fold(path, out=out, level="so101-real", view="iso", fps=6, max_seconds=1.0,
+                     width=320, height=240, on_log=lambda x: None)
+    if m["status"] == "error":  # no GL context
+        pytest.skip(f"mujoco render unavailable: {str(m.get('error'))[:60]}")
+    assert m["status"] == "ok" and m["renderer"] == "mujoco"
+    assert m["motor_commands_sent"] == 0 and m["simulation_only"] is True
+    assert m["control"] == "none (simulation only)"
+    assert isinstance(m["so101_assets"]["found"], bool)
+
+    import imageio.v2 as iio
+
+    arr = np.asarray(list(iio.get_reader(out))[-1])[:, :, :3]
+    assert arr.mean() > 20 and arr.std() > 10  # visible 3D arm scene
+
+
+def test_so101_real_all_views_render(tmp_path):
+    pytest.importorskip("mujoco")
+    from terafold.sim.fold_sim import ALL_VIEWS, run_sim_fold
+
+    path, _ = _plan_json(tmp_path)
+    m = run_sim_fold(path, out=str(tmp_path / "fold.gif"), level="so101-real", all_views=True,
+                     fps=5, max_seconds=0.8, width=240, height=200, on_log=lambda x: None)
+    if m["status"] == "error":
+        pytest.skip("mujoco render unavailable")
+    assert m["all_views"] is True
+    assert set(m["views"]) == set(ALL_VIEWS)
+    for p in m["views"].values():
+        assert os.path.exists(p)
+
+
+def test_so101_real_save_frames(tmp_path):
+    import glob
+
+    pytest.importorskip("mujoco")
+    from terafold.sim.fold_sim import run_sim_fold
+
+    path, _ = _plan_json(tmp_path)
+    m = run_sim_fold(path, out=str(tmp_path / "f.gif"), level="so101-real", view="top",
+                     save_frames=True, fps=5, max_seconds=0.8, width=240, height=200,
+                     on_log=lambda x: None)
+    if m["status"] == "error":
+        pytest.skip("mujoco render unavailable")
+    assert "frames_dirs" in m
+    pngs = glob.glob(os.path.join(m["frames_dirs"]["top"], "*.png"))
+    assert len(pngs) == m["frames"] and len(pngs) > 0
+
+
+def test_so101_real_slowmo_lengthens_playback(tmp_path):
+    pytest.importorskip("mujoco")
+    from terafold.sim.fold_sim import run_sim_fold
+
+    path, _ = _plan_json(tmp_path)
+    base = run_sim_fold(path, out=str(tmp_path / "n.gif"), level="so101-real", view="iso",
+                        fps=6, max_seconds=1.0, width=240, height=200, on_log=lambda x: None)
+    slow = run_sim_fold(path, out=str(tmp_path / "s.gif"), level="so101-real", view="iso",
+                        fps=6, max_seconds=1.0, slowmo=True, width=240, height=200,
+                        on_log=lambda x: None)
+    if base["status"] == "error" or slow["status"] == "error":
+        pytest.skip("mujoco render unavailable")
+    assert slow["frames"] > base["frames"]
+    assert slow["slowmo"] is True

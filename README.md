@@ -262,20 +262,52 @@ open runs/sim/fold_arm_iso.mp4
 The MuJoCo scene uses a free camera **auto-fit** to the trajectory + table (with a
 headlight + skybox so nothing is black) and draws debug objects: towel rectangle,
 yellow fold crease, grasp/place markers, an EE trail, and an RGB frame triad.
-`--view` presets: `iso` (default), `top`, `side`, `follow-ee`. If the trajectory
-would fall outside the frame, a warning prints the camera position, target, and
-bounds.
+`--view` presets: `iso` (default), `top`, `side`, `follow-ee`, `gripper`. If the
+trajectory would fall outside the frame, a warning prints the camera position,
+target, and bounds.
+
+#### Realistic SO-101 arm (`--level so101-real`)
+
+A much closer **5-DOF SO-101 approximation** (proportional link lengths, real
+joint limits, a parallel-jaw gripper that opens/closes from the trajectory) with
+distinct materials for links / gripper / towel / table / crease / markers and a
+per-frame phase subtitle. TeraFold first looks for *official* SO-101 assets
+(URDF/MJCF/meshes from the repo, `$TERAFOLD_SO101_MJCF`, or installed
+LeRobot / MuJoCo Menagerie / `robot_descriptions`); if none are found it uses
+this built-in approximation and says so.
+
+```bash
+# Single view:
+python3 -m terafold sim-fold --plan-json runs/demo_image/claude_result.json \
+    --level so101-real --view iso --out runs/sim/fold_so101_real_iso.mp4
+
+# All four views -> fold_so101_real_{iso,top,side,gripper}.mp4:
+python3 -m terafold sim-fold --plan-json runs/demo_image/claude_result.json \
+    --level so101-real --all-views --out runs/sim/fold_so101_real.mp4
+
+# Slow-motion review + exported PNG frames:
+python3 -m terafold sim-fold --plan-json runs/demo_image/claude_result.json \
+    --level so101-real --view side --slowmo --save-frames --out runs/sim/fold_so101_real_side.mp4
+open runs/sim/fold_so101_real_iso.mp4
+```
+
+Flags: `--all-views` (iso/top/side/gripper), `--save-frames` (PNG export),
+`--slowmo` (longer playback), `--waypoint-dots/--no-waypoint-dots` (planned
+waypoint dots; on by default for `so101-real`). To use a real SO-101 model, point
+`$TERAFOLD_SO101_MJCF` at an MJCF file and it will be picked up automatically.
 
 Levels:
 - `ee-only` (default) — end-effector sphere follows the path; **always works**
   (2D top-down renderer, no MuJoCo needed). Saves `runs/sim/fold_ee.mp4`.
 - `cloth-proxy` — the towel proxy visually folds along the crease as the gripper
   crosses the fold line.
-- `arm-ik` — an approximate SO-101 6-DOF arm follows via MuJoCo (needs
-  `pip install -e ".[sim]"`; without it you get a clear install message).
+- `arm-ik` — a simple 6-DOF arm follows via MuJoCo (needs `pip install -e ".[sim]"`;
+  without it you get a clear install message).
+- `so101-real` — the realistic 5-DOF SO-101 approximation (see above).
 
-Each run also writes `<out>.meta.json` (level, renderer, frames, fps, fold
-direction, `control: none (simulation only)`, `motor_commands_sent: 0`). Use
+Each run also writes `<out>.meta.json` (level, view, renderer, frames, fps, fold
+direction, SO-101 asset report, `control: none (simulation only)`,
+`motor_commands_sent: 0`). Use
 `--use-mujoco` to force the 3D MuJoCo scene for any level. If MuJoCo is missing,
 `ee-only`/`cloth-proxy` fall back to the 2D renderer so the demo still produces a
 video.

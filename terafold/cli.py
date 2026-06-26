@@ -1002,8 +1002,14 @@ def benchmark_cmd(
 def sim_fold_cmd(
     plan_json: str = typer.Option(..., help="A FoldPlan / demo result JSON."),
     out: str = typer.Option("runs/sim/fold_demo.mp4", help="Output video (.mp4 / .gif)."),
-    level: str = typer.Option("ee-only", help="ee-only | arm-ik | cloth-proxy."),
-    view: str = typer.Option("iso", help="Camera (MuJoCo): top | iso | side | follow-ee."),
+    level: str = typer.Option("ee-only", help="ee-only | arm-ik | cloth-proxy | so101-real."),
+    view: str = typer.Option("iso", help="Camera (MuJoCo): top | iso | side | follow-ee | gripper."),
+    all_views: bool = typer.Option(False, "--all-views", help="Render iso/top/side/gripper (MuJoCo)."),
+    save_frames: bool = typer.Option(False, "--save-frames", help="Also export PNG frames."),
+    slowmo: bool = typer.Option(False, "--slowmo", help="Slower playback for review."),
+    waypoint_dots: Optional[bool] = typer.Option(
+        None, "--waypoint-dots/--no-waypoint-dots",
+        help="Show planned-waypoint dots (default on for so101-real)."),
     fps: int = typer.Option(20),
     max_seconds: float = typer.Option(10.0, help="Cap the (time-compressed) video length."),
     width: int = typer.Option(640),
@@ -1012,14 +1018,17 @@ def sim_fold_cmd(
 ):
     """Simulate the planned fold (virtual SO-101 / end-effector). SIMULATION ONLY.
 
-    ee-only / cloth-proxy work without MuJoCo (2D top-down renderer). arm-ik needs
-    MuJoCo:  python3 -m pip install -e ".[sim]".  No motor commands are ever sent.
+    ee-only / cloth-proxy work without MuJoCo (2D top-down renderer). arm-ik and
+    so101-real need MuJoCo:  python3 -m pip install -e ".[sim]".  so101-real is a
+    realistic 5-DOF SO-101 approximation. No motor commands are ever sent.
     """
     from terafold.sim.fold_sim import run_sim_fold
 
     res = run_sim_fold(
-        plan_json, out=out, level=level, view=view, fps=fps, max_seconds=max_seconds,
-        width=width, height=height, use_mujoco=use_mujoco, on_log=_echo,
+        plan_json, out=out, level=level, view=view, all_views=all_views,
+        save_frames=save_frames, slowmo=slowmo, waypoint_dots=waypoint_dots,
+        fps=fps, max_seconds=max_seconds, width=width, height=height,
+        use_mujoco=use_mujoco, on_log=_echo,
     )
     status = res.get("status")
     if status == "missing_dependency":
@@ -1032,7 +1041,18 @@ def sim_fold_cmd(
             _echo(res["hint"])
         raise typer.Exit(1)
     _ok(f"sim-fold complete ({res['renderer']}, {res['frames']} frames, ~{res['duration_s']}s).")
-    _echo(f"  video : {res.get('video') or res.get('out')}")
+    if res.get("so101_assets"):
+        a = res["so101_assets"]
+        which = (f"official {a['type']} @ {a['path']}" if a["found"]
+                 else "approximation (no official assets found)")
+        _echo(f"  SO-101 assets : {which}")
+    if res.get("all_views"):
+        for v, p in res["views"].items():
+            _echo(f"  {v:10s}: {p}")
+    else:
+        _echo(f"  video : {res.get('video') or res.get('out')}")
+    for v, d in (res.get("frames_dirs") or {}).items():
+        _echo(f"  frames[{v}]: {d}")
     _echo(f"  meta  : {res.get('meta_json')}")
     _echo(f"  {res.get('note')}")
 

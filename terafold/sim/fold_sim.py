@@ -29,7 +29,10 @@ from typing import Any, Dict, List, Optional, Tuple
 import numpy as np
 
 SIM_BANNER = "SIMULATION ONLY — not calibrated to real hardware."
-LEVELS = ("ee-only", "arm-ik", "cloth-proxy")
+LEVELS = ("ee-only", "arm-ik", "cloth-proxy", "so101-real")
+MUJOCO_LEVELS = ("arm-ik", "so101-real")  # levels that require a 3D MuJoCo arm
+ALL_VIEWS = ("iso", "top", "side", "gripper")
+SLOWMO_FACTOR = 2.5
 SIM_INSTALL_HINT = 'python3 -m pip install -e ".[sim]"'
 
 __all__ = ["run_sim_fold", "load_plan", "parse_trajectory", "LEVELS", "SIM_BANNER"]
@@ -227,6 +230,26 @@ def _banner(img, text):
         img[:24] = (170, 30, 30)  # red banner without text
 
 
+def _overlay(img, top_text, bottom_text=None):
+    """Top safety banner + optional bottom phase subtitle (PIL if available)."""
+    h, w = img.shape[:2]
+    try:
+        from PIL import Image, ImageDraw
+
+        pil = Image.fromarray(np.ascontiguousarray(img[:, :, :3]))
+        dr = ImageDraw.Draw(pil)
+        dr.rectangle([0, 0, w, 24], fill=(170, 30, 30))
+        dr.text((8, 6), top_text, fill=(255, 255, 255))
+        if bottom_text:
+            dr.rectangle([0, h - 24, w, h], fill=(20, 22, 28))
+            dr.text((8, h - 18), bottom_text, fill=(240, 240, 120))
+        img[:, :, :3] = np.asarray(pil)
+    except Exception:
+        img[:24] = (170, 30, 30)
+        if bottom_text:
+            img[h - 24:] = (20, 22, 28)
+
+
 def _moving_half(corners, direction, f):
     """Return the moving-half quad folded by fraction ``f`` (corners reflect across crease)."""
     tl, tr, br, bl = corners
@@ -293,7 +316,7 @@ def _render_2d(level, waypoints, gripper, times, phases, scene, w, h, fps, max_s
             _disk(img, cur, r, (235, 60, 50), fill=True)
         else:
             _disk(img, cur, r, (60, 210, 90), fill=False, thickness=3)
-        _banner(img, f"{SIM_BANNER}   [{level}]  phase={ph[i]}")
+        _overlay(img, f"{SIM_BANNER}  [{level}]", f"phase: {ph[i]}")
         frames.append(img)
     log(f"   2D renderer: {n_frames} frames, ~{n_frames / fps:.1f}s @ {fps}fps")
     return frames
@@ -358,7 +381,9 @@ VIEW_PRESETS = {
     "top": (90.0, -89.0),
     "side": (90.0, -10.0),
     "follow-ee": (45.0, -28.0),
+    "gripper": (35.0, -22.0),  # close-up that tracks the gripper
 }
+_FOLLOW_VIEWS = ("follow-ee", "gripper")
 
 
 def _scene_bounds(waypoints, scene) -> Dict[str, np.ndarray]:
@@ -390,6 +415,8 @@ def _make_camera(view, bounds, fovy):
     dist = fit * 1.4 + 0.15
     if view == "follow-ee":
         dist = max(bounds["radius"] * 2.2, 0.30)
+    elif view == "gripper":
+        dist = max(bounds["radius"] * 1.1, 0.20)  # tight close-up
     cam.azimuth, cam.elevation, cam.distance = az, el, dist
     return cam, {"azimuth": az, "elevation": el, "distance": dist, "fovy": fovy,
                  "lookat": bounds["center"].tolist()}
@@ -439,8 +466,48 @@ def _add_trail(scene_obj, pts, max_pts=60, rgba=(0.95, 0.95, 1.0, 0.75)):
         scene_obj.ngeom += 1
 
 
+def _add_waypoint_dots(scene_obj, waypoints, rgba=(0.85, 0.35, 0.95, 0.9)):
+    """Append a small sphere at each planned waypoint."""
+    import mujoco
+
+    mat = np.eye(3).flatten()
+    size = np.array([0.006, 0.0, 0.0])
+    col = np.array(rgba, dtype=np.float32)
+    for p in waypoints[:, :3]:
+        if scene_obj.ngeom >= scene_obj.maxgeom:
+            break
+        g = scene_obj.geoms[scene_obj.ngeom]
+        mujoco.mjv_initGeom(g, mujoco.mjtGeom.mjGEOM_SPHERE, size,
+                            np.ascontiguousarray(p, dtype=np.float64), mat, col)
+        scene_obj.ngeom += 1
+
+
+def _setup_so101(model, data, level):
+    """For so101-real: set a sensible home pose and return gripper actuator ids."""
+    import mujoco
+
+    from terafold.sim import so101
+
+    grip_acts = []
+    if level != "so101-real":
+        return grip_acts, 0.0
+    for jname, deg in so101.SO101_SPEC["home_deg"].items():
+        try:
+            data.qpos[model.joint(jname).qposadr[0]] = np.radians(deg)
+        except Exception:
+            pass
+    mujoco.mj_forward(model, data)
+    for aname in so101.SO101_GRIPPER_ACTUATORS:
+        try:
+            grip_acts.append(model.actuator(aname).id)
+        except Exception:
+            pass
+    return grip_acts, so101.SO101_SPEC["finger_travel"]
+
+
 def _render_mujoco(level, waypoints, gripper, times, phases, scene, w, h, fps, max_seconds, log,
-                   view: str = "iso", debug_xml_path: Optional[str] = None) -> List[np.ndarray]:
+                   view: str = "iso", waypoint_dots: bool = False,
+                   debug_xml_path: Optional[str] = None) -> List[np.ndarray]:
     import mujoco  # noqa: F401
 
     ee, grip, ph, duration, n_frames = _timeline(waypoints, gripper, times, phases, fps, max_seconds)
@@ -458,14 +525,19 @@ def _render_mujoco(level, waypoints, gripper, times, phases, scene, w, h, fps, m
                 hinge_qadr = model.joint("fold_hinge").qposadr[0]
             except Exception:
                 hinge_qadr = None
+        grip_acts, grip_close = _setup_so101(model, data, level)
+        substeps = 60 if level == "so101-real" else 40
 
         # Auto-fit a free camera to the whole trajectory + table.
         bounds = _scene_bounds(waypoints, scene)
         fovy = float(model.vis.global_.fovy)
         cam, cam_info = _make_camera(view, bounds, fovy)
-        warn = _framing_warning(view, cam_info, bounds)
-        if warn:
-            log(warn)
+        # Follow/gripper views are intentional close-ups that track the EE, so a
+        # "whole trajectory doesn't fit" warning would be expected noise there.
+        if view not in _FOLLOW_VIEWS:
+            warn = _framing_warning(view, cam_info, bounds)
+            if warn:
+                log(warn)
         log(f"   camera: view={view} az={cam_info['azimuth']} el={cam_info['elevation']} "
             f"dist={cam_info['distance']:.2f} target={np.round(cam_info['lookat'], 3).tolist()}")
 
@@ -474,16 +546,23 @@ def _render_mujoco(level, waypoints, gripper, times, phases, scene, w, h, fps, m
             data.mocap_pos[mocap_id] = ee[i]
             if hinge_qadr is not None:
                 data.qpos[hinge_qadr] = float(fold[i]) * np.pi
-            if level == "arm-ik":
-                for _ in range(40):  # let the weld constraint pull the arm to the EE
+            # Gripper open(1)/close(0) from the trajectory -> finger close ctrl.
+            for aid in grip_acts:
+                data.ctrl[aid] = (1.0 - float(grip[i])) * grip_close
+            if level in ("arm-ik", "so101-real"):
+                for _ in range(substeps):  # weld constraint pulls the arm to the EE
                     mujoco.mj_step(model, data)
             else:
                 mujoco.mj_forward(model, data)
-            if view == "follow-ee":
+            if view in _FOLLOW_VIEWS:
                 cam.lookat[:] = ee[i]
             renderer.update_scene(data, camera=cam)
             _add_trail(renderer.scene, ee[: i + 1])  # EE trail overlay
-            frames.append(renderer.render().copy())
+            if waypoint_dots:
+                _add_waypoint_dots(renderer.scene, waypoints)
+            img = renderer.render().copy()
+            _overlay(img, f"{SIM_BANNER}  [{level}]", f"phase: {ph[i]}")
+            frames.append(img)
         renderer.close()
     except Exception as exc:
         # Req 6: on any MuJoCo failure, dump the exact MJCF and surface a snippet.
@@ -572,11 +651,27 @@ def _build_mjcf(level, scene, ee, w, h) -> str:
     arm_xml = ""
     weld_xml = ""
     defaults_xml = ""
+    actuator_xml = ""
+    extra_materials = ""
+    ee_geom = '<geom name="ee_sphere" type="sphere" size="0.016" rgba="0.95 0.2 0.18 1"/>'
     if level == "arm-ik":
         arm_xml = _arm_chain(span, cx - 0.5 * span, cy)
         # Weld the gripper to the EE mocap so the arm follows the planned path.
         weld_xml = '<equality><weld body1="gripper" body2="ee" solref="0.02 1"/></equality>'
         defaults_xml = '<default><joint damping="3" armature="0.05" limited="false"/></default>'
+    elif level == "so101-real":
+        from terafold.sim import so101
+
+        base_off = max(0.55 * span, 0.20)
+        arm = so101.build_so101_arm((cx, cy - base_off), base_z=0.0)
+        arm_xml = arm["body_xml"]
+        weld_xml = arm["weld_xml"]
+        actuator_xml = arm["actuator_xml"]
+        extra_materials = arm["materials_xml"]
+        defaults_xml = ('<default><joint damping="5" armature="0.1"/>'
+                        '<position kp="30"/></default>')
+        # The real gripper renders at the EE; keep only a tiny weld-target marker.
+        ee_geom = '<geom name="ee_sphere" type="sphere" size="0.006" rgba="0.95 0.3 0.3 0.6"/>'
 
     cloth_moving = ""
     if level == "cloth-proxy":
@@ -586,11 +681,11 @@ def _build_mjcf(level, scene, ee, w, h) -> str:
         cloth_moving = f"""
     <body name="moving_half" pos="{float(cmid[0])} {float(cmid[1])} 0.002">
       <joint name="fold_hinge" type="hinge" axis="{float(cdir[0])} {float(cdir[1])} 0" pos="0 0 0" limited="false"/>
-      <geom type="box" pos="{float(ctr[0]-cmid[0])} {float(ctr[1]-cmid[1])} 0" size="{0.25*span} {0.5*span} 0.002" rgba="0.43 0.69 0.67 1"/>
+      <geom type="box" pos="{float(ctr[0]-cmid[0])} {float(ctr[1]-cmid[1])} 0" size="{0.25*span} {0.5*span} 0.002" material="towel_moving"/>
     </body>"""
-        static_geom = f'<geom name="towel" type="box" pos="{cx} {cy} 0" size="{0.5*span} {0.5*span} 0.002" rgba="0.28 0.55 0.55 1"/>'
+        static_geom = f'<geom name="towel" type="box" pos="{cx} {cy} 0" size="{0.5*span} {0.5*span} 0.002" material="towel"/>'
     else:
-        static_geom = f'<geom name="towel" type="box" pos="{cx} {cy} 0.002" size="{0.5*span} {0.5*span} 0.003" rgba="0.32 0.57 0.57 1"/>'
+        static_geom = f'<geom name="towel" type="box" pos="{cx} {cy} 0.002" size="{0.5*span} {0.5*span} 0.0015" material="towel"/>'
 
     ca, cb = scene["crease_a"], scene["crease_b"]
     cl = max(0.5 * span, 0.05)  # frame-axis length
@@ -607,6 +702,7 @@ def _build_mjcf(level, scene, ee, w, h) -> str:
     )
     return f"""
 <mujoco model="terafold_fold_sim">
+  <compiler angle="degree" autolimits="true"/>
   <option timestep="0.002" gravity="0 0 0" integrator="implicitfast"/>
   <visual>
     <global offwidth="{w}" offheight="{h}"/>
@@ -616,12 +712,17 @@ def _build_mjcf(level, scene, ee, w, h) -> str:
   </visual>
   <asset>
     <texture name="sky" type="skybox" builtin="gradient" rgb1="0.34 0.36 0.42" rgb2="0.12 0.13 0.16" width="64" height="64"/>
+    <texture name="tabletex" type="2d" builtin="checker" rgb1="0.50 0.51 0.55" rgb2="0.42 0.43 0.47" width="300" height="300"/>
+    <material name="table" texture="tabletex" texrepeat="6 6" specular="0.2" shininess="0.1"/>
+    <material name="towel" rgba="0.20 0.55 0.62 1" specular="0.1" shininess="0.05"/>
+    <material name="towel_moving" rgba="0.30 0.66 0.70 1" specular="0.1" shininess="0.05"/>
+    {extra_materials}
   </asset>
   {defaults_xml}
   <worldbody>
-    <light name="key" pos="{cx + span} {cy - span} {cam_z}" dir="-1 1 -2" diffuse="0.6 0.6 0.6" directional="true"/>
+    <light name="key" pos="{cx + span} {cy - span} {cam_z}" dir="-1 1 -2" diffuse="0.7 0.7 0.7" specular="0.3 0.3 0.3" directional="true"/>
     <light name="fill" pos="{cx - span} {cy + span} {cam_z}" dir="1 -1 -2" diffuse="0.4 0.4 0.4" directional="true"/>
-    <geom name="table" type="box" pos="{cx} {cy} -0.01" size="{1.0*span} {1.0*span} 0.01" rgba="0.55 0.56 0.6 1"/>
+    <geom name="table" type="box" pos="{cx} {cy} -0.01" size="{1.0*span} {1.0*span} 0.01" material="table"/>
     {static_geom}
     {cloth_moving}
     {crease_geom}
@@ -629,9 +730,10 @@ def _build_mjcf(level, scene, ee, w, h) -> str:
     <geom name="grasp" type="sphere" pos="{gx} {gy} 0.008" size="0.012" rgba="1 0.55 0.1 1"/>
     <geom name="place" type="sphere" pos="{px} {py} 0.008" size="0.012" rgba="0.1 0.8 0.85 1"/>
     <body name="ee" mocap="true" pos="{float(ee[0,0])} {float(ee[0,1])} {z0}">
-      <geom name="ee_sphere" type="sphere" size="0.016" rgba="0.95 0.2 0.18 1"/>
+      {ee_geom}
     </body>{arm_xml}
   </worldbody>
+  {actuator_xml}
   {weld_xml}
 </mujoco>"""
 
@@ -663,6 +765,21 @@ def _missing_mujoco(plan_json, out, level, n_waypoints) -> Dict[str, Any]:
     }
 
 
+def _view_out(out: str, view: str) -> str:
+    base, ext = os.path.splitext(out)
+    return f"{base}_{view}{ext}"
+
+
+def _save_frames(frames: List[np.ndarray], out_path: str) -> str:
+    frames_dir = os.path.splitext(out_path)[0] + "_frames"
+    os.makedirs(frames_dir, exist_ok=True)
+    from terafold.vision.imageio import imwrite
+
+    for i, fr in enumerate(frames):
+        imwrite(os.path.join(frames_dir, f"frame_{i:04d}.png"), np.ascontiguousarray(fr[:, :, :3]))
+    return frames_dir
+
+
 def run_sim_fold(
     plan_json: str,
     out: Optional[str] = None,
@@ -673,9 +790,18 @@ def run_sim_fold(
     height: int = 480,
     use_mujoco: bool = False,
     view: str = "iso",
+    all_views: bool = False,
+    save_frames: bool = False,
+    slowmo: bool = False,
+    waypoint_dots: Optional[bool] = None,
     on_log=print,
 ) -> Dict[str, Any]:
-    """Render a fold simulation video from a TeraFold plan JSON. Returns metadata."""
+    """Render a fold simulation video (or videos) from a TeraFold plan JSON.
+
+    Returns metadata. ``level`` so101-real / arm-ik need MuJoCo. ``all_views``
+    renders iso/top/side/gripper to ``<out>_<view>.<ext>``. ``slowmo`` lengthens
+    the playback; ``save_frames`` also exports PNG frames.
+    """
     log = on_log or (lambda _m: None)
     level = (level or "ee-only").lower()
     if level not in LEVELS:
@@ -686,28 +812,57 @@ def run_sim_fold(
     out = out or f"runs/sim/fold_{level.replace('-', '_')}.mp4"
     log(SIM_BANNER)
 
-    want_mujoco = use_mujoco or level == "arm-ik"
-    renderer = None
-    frames: Optional[List[np.ndarray]] = None
-    render_error = None
-
+    requires_mujoco = level in MUJOCO_LEVELS
+    want_mujoco = use_mujoco or requires_mujoco
+    use_mj = False
     if want_mujoco:
         if not have_mujoco():
-            if level == "arm-ik":
+            if requires_mujoco:
                 return _missing_mujoco(plan_json, out, level, len(waypoints))
             log(f"[warn] MuJoCo not installed; using the 2D renderer. {SIM_INSTALL_HINT}")
         else:
-            debug_xml = os.path.splitext(out)[0] + ".mjcf.xml"
+            use_mj = True
+
+    # so101-real: report which SO-101 assets were found / used.
+    asset_report = None
+    if level == "so101-real":
+        from terafold.sim import so101
+
+        asset_report = so101.find_so101_assets()
+        log(f"   SO-101 assets: {'official ' + str(asset_report['type']) + ' @ ' + str(asset_report['path']) if asset_report['found'] else 'approximation (no official assets found)'}")
+
+    eff_max = max_seconds * (SLOWMO_FACTOR if slowmo else 1.0)
+    if waypoint_dots is None:
+        waypoint_dots = level == "so101-real"  # default-on for the realistic arm
+
+    if all_views and use_mj:
+        views = list(ALL_VIEWS)
+    else:
+        if all_views and not use_mj:
+            log("[note] --all-views applies to MuJoCo renders; producing one 2D video.")
+        views = [view]
+
+    outputs: Dict[str, str] = {}
+    frames_dirs: Dict[str, str] = {}
+    renderer = "2d"
+    render_error = None
+    n_frames = 0
+
+    for v in views:
+        out_v = _view_out(out, v) if (all_views and use_mj) else out
+        frames: Optional[List[np.ndarray]] = None
+        if use_mj:
+            debug_xml = os.path.splitext(out_v)[0] + ".mjcf.xml"
             try:
                 frames = _render_mujoco(level, waypoints, gripper, times, phases, scene,
-                                        width, height, fps, max_seconds, log, view=view,
-                                        debug_xml_path=debug_xml)
+                                        width, height, fps, eff_max, log, view=v,
+                                        waypoint_dots=waypoint_dots, debug_xml_path=debug_xml)
                 renderer = "mujoco"
             except Exception as exc:
                 render_error = str(exc)
-                if level == "arm-ik":
+                if requires_mujoco:
                     return {
-                        "status": "error", "level": level, "out": out,
+                        "status": "error", "level": level, "view": v, "out": out_v,
                         "error": f"MuJoCo render failed: {exc}",
                         "xml_debug": debug_xml if os.path.exists(debug_xml) else None,
                         "hint": "Inspect the MJCF above, or use --level ee-only (2D, always works).",
@@ -716,23 +871,32 @@ def run_sim_fold(
                         "simulation_only": True,
                     }
                 log(f"[warn] MuJoCo render failed ({exc}); falling back to the 2D renderer.")
+        if frames is None:
+            frames = _render_2d(level, waypoints, gripper, times, phases, scene,
+                                width, height, fps, eff_max, log)
+            renderer = "2d"
+        n_frames = len(frames)
+        video = _write_video(frames, out_v, fps)
+        outputs[v] = video.get("video") or video.get("frames_dir")
+        if save_frames:
+            frames_dirs[v] = _save_frames(frames, out_v)
 
-    if frames is None:
-        frames = _render_2d(level, waypoints, gripper, times, phases, scene,
-                            width, height, fps, max_seconds, log)
-        renderer = renderer or "2d"
-
-    video = _write_video(frames, out, fps)
+    primary_view = views[0]
+    primary_out = outputs[primary_view]
     meta = {
         "status": "ok",
         "level": level,
-        "view": view,
+        "view": primary_view,
+        "views": outputs,
+        "all_views": bool(all_views and use_mj),
         "renderer": renderer,
-        "out": video.get("video") or video.get("frames_dir"),
-        "video": video.get("video"),
-        "frames": len(frames),
+        "out": primary_out,
+        "video": primary_out,
+        "frames": n_frames,
         "fps": fps,
-        "duration_s": round(len(frames) / fps, 2),
+        "slowmo": bool(slowmo),
+        "waypoint_dots": bool(waypoint_dots),
+        "duration_s": round(n_frames / fps, 2),
         "num_waypoints": int(len(waypoints)),
         "fold_direction": scene["direction"],
         "control": "none (simulation only)",
@@ -741,6 +905,10 @@ def run_sim_fold(
         "note": SIM_BANNER,
         "source_plan": plan_json,
     }
+    if asset_report is not None:
+        meta["so101_assets"] = asset_report
+    if frames_dirs:
+        meta["frames_dirs"] = frames_dirs
     if render_error:
         meta["mujoco_error"] = render_error
     meta_path = _meta_path(out)
