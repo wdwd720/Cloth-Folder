@@ -19,6 +19,7 @@ from typing import Optional
 import numpy as np
 
 from terafold.math.geometry import (
+    as_vector,
     midpoint,
     reflect_point_across_line,
 )
@@ -37,6 +38,7 @@ __all__ = [
     "predict_folded_footprint",
     "grasp_place_from_keypoints",
     "GRASP_STRATEGIES",
+    "DIRECTION_GRASP_STRATEGY",
 ]
 
 GRASP_STRATEGIES = (
@@ -48,6 +50,18 @@ GRASP_STRATEGIES = (
     "right_bottom_corner",
     "center",
 )
+
+# The fold DIRECTION determines which edge is the moving (grasp) edge. This is
+# authoritative — it overrides a config strategy or a detector keypoint that
+# would grab the wrong side. For ``fold_towel_half_right_to_left`` the right half
+# moves, so the grasp is the right-edge midpoint and the place is its reflection
+# across the vertical centre crease (landing on the left edge).
+DIRECTION_GRASP_STRATEGY = {
+    "right_to_left": "right_edge_midpoint",
+    "left_to_right": "left_edge_midpoint",
+    "top_to_bottom": "top_edge_midpoint",
+    "bottom_to_top": "bottom_edge_midpoint",
+}
 
 
 def compute_fold_line(kp: ClothKeypoints, direction: str = "right_to_left") -> FoldLine:
@@ -154,23 +168,70 @@ def predict_folded_corners(
     return predict_folded_footprint(kp, direction)
 
 
+def _crease_normal(fold_line: FoldLine) -> np.ndarray:
+    """In-plane normal to the crease (perpendicular to its direction)."""
+    d = as_vector(fold_line.direction)[:2]
+    return np.array([-d[1], d[0]], dtype=np.float64)
+
+
+def _side_sign(point, fold_line: FoldLine) -> float:
+    """Signed offset of ``point`` from the crease along the crease normal.
+
+    Same sign == same side of the crease. Used to decide whether a candidate
+    grasp is on the moving (correct) side for the fold direction.
+    """
+    p = as_vector(point)[:2]
+    return float(np.dot(p - as_vector(fold_line.point)[:2], _crease_normal(fold_line)))
+
+
 def grasp_place_from_keypoints(
     kp: ClothKeypoints,
     direction: str = "right_to_left",
-    grasp_strategy: str = "right_edge_midpoint",
+    grasp_strategy: Optional[str] = None,
     grasp_override: Optional[np.ndarray] = None,
 ) -> GraspPlacePair:
-    """Full geometric grasp/place pair for a fold.
+    """Full geometric grasp/place pair for a fold — DIRECTION is authoritative.
 
-    If ``grasp_override`` is given (e.g. a learned grasp keypoint), it is used
-    instead of the strategy heuristic; the place point is always the reflection
-    of the (chosen) grasp across the crease.
+    The grasp must lie on the *moving* edge implied by ``direction`` (e.g. the
+    right edge for ``right_to_left``). A config ``grasp_strategy`` or a detector
+    ``grasp_override`` (e.g. a Claude/learned grasp keypoint) is honored ONLY if
+    it lands on that moving side; if it conflicts with the task direction it is
+    ignored and the direction-derived edge midpoint is used instead. The place
+    point is always the reflection of the chosen grasp across the crease.
     """
     fold_line = compute_fold_line(kp, direction)
-    grasp = (
-        np.asarray(grasp_override, dtype=np.float64).reshape(-1)
-        if grasp_override is not None
-        else compute_grasp_point(kp, grasp_strategy)
-    )
+
+    # 1. Canonical grasp: the moving-edge midpoint chosen by the fold direction.
+    moving_strategy = DIRECTION_GRASP_STRATEGY.get(direction, grasp_strategy or "right_edge_midpoint")
+    grasp = compute_grasp_point(kp, moving_strategy)
+    moving_sign = _side_sign(grasp, fold_line)
+    rejected: list[str] = []
+
+    # 2. A config strategy may refine WHERE on the moving edge to grasp, but only
+    #    if it stays on the correct side.
+    if grasp_strategy and grasp_strategy != moving_strategy:
+        try:
+            cand = compute_grasp_point(kp, grasp_strategy)
+            if _side_sign(cand, fold_line) * moving_sign > 0:
+                grasp = cand
+            else:
+                rejected.append(f"strategy {grasp_strategy!r} (wrong side for {direction})")
+        except ValueError:
+            pass
+
+    # 3. A detector grasp (markers / learned / Claude) is honored only when it
+    #    agrees with the task direction — never trusted blindly.
+    if grasp_override is not None:
+        ov = as_vector(grasp_override)[:2]
+        if _side_sign(ov, fold_line) * moving_sign > 0:
+            grasp = ov
+        else:
+            rejected.append(f"detector grasp {ov.tolist()} (wrong side for {direction})")
+
     place = compute_place_point(grasp, fold_line)
-    return GraspPlacePair(grasp=grasp, place=place, confidence=float(kp.rectangularity()))
+    meta = {"direction": direction, "moving_strategy": moving_strategy}
+    if rejected:
+        meta["rejected_overrides"] = rejected
+    return GraspPlacePair(
+        grasp=grasp, place=place, confidence=float(kp.rectangularity()), metadata=meta
+    )
