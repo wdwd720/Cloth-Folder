@@ -63,6 +63,13 @@ claude = [
 robot = [
     "pyserial>=3.5",
 ]
+# Virtual SO-101 fold simulation (MuJoCo) + video rendering.
+sim = [
+    "mujoco>=3.1",
+    "imageio>=2.31",
+    "imageio-ffmpeg>=0.4",
+    "matplotlib>=3.7",
+]
 # Plotting / debug visualization.
 viz = [
     "matplotlib>=3.7",

@@ -228,6 +228,45 @@ missing requirement is listed and real motion is refused — overlay / JSON / pl
 are still saved. (`GenericArmAdapter` is a dry-run-only safe shell for an
 unidentified arm; it refuses real motion until a verified backend is wired.)
 
+### Virtual SO-101 fold simulation
+
+Demo the fold **virtually** — no physical arm powered on. A simulated end-effector
+(and, with MuJoCo, an approximate 6-DOF arm) follows the planned trajectory and
+renders a video. **SIMULATION ONLY — not calibrated to real hardware; no motor
+commands are ever sent.**
+
+```bash
+# Plan from a photo (Claude / markers / model) and export the trajectory:
+python3 -m terafold demo-image --image ~/Downloads/towel_demo_pic.png --mode claude \
+    --overlay-out runs/demo_image/claude_overlay.png --save-json runs/demo_image/claude_result.json
+python3 -m terafold export-trajectory --plan-json runs/demo_image/claude_result.json \
+    --out runs/demo_image/trajectory.csv
+
+# Install the sim extra (MuJoCo + video):
+python3 -m pip install -e ".[sim]"
+
+# Render the fold simulation:
+python3 -m terafold sim-fold --plan-json runs/demo_image/claude_result.json --level ee-only \
+    --out runs/sim/fold_ee.mp4
+python3 -m terafold sim-fold --plan-json runs/demo_image/claude_result.json --level cloth-proxy \
+    --out runs/sim/fold_cloth_proxy.mp4
+open runs/sim/fold_ee.mp4
+```
+
+Levels:
+- `ee-only` (default) — end-effector sphere follows the path; **always works**
+  (2D top-down renderer, no MuJoCo needed). Saves `runs/sim/fold_ee.mp4`.
+- `cloth-proxy` — the towel proxy visually folds along the crease as the gripper
+  crosses the fold line.
+- `arm-ik` — an approximate SO-101 6-DOF arm follows via MuJoCo (needs
+  `pip install -e ".[sim]"`; without it you get a clear install message).
+
+Each run also writes `<out>.meta.json` (level, renderer, frames, fps, fold
+direction, `control: none (simulation only)`, `motor_commands_sent: 0`). Use
+`--use-mujoco` to force the 3D MuJoCo scene for any level. If MuJoCo is missing,
+`ee-only`/`cloth-proxy` fall back to the 2D renderer so the demo still produces a
+video.
+
 ## 14. Record real demos
 
 ```bash

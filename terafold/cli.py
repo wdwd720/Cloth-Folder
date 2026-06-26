@@ -998,6 +998,44 @@ def benchmark_cmd(
     _echo(print_benchmark(report))
 
 
+@app.command("sim-fold")
+def sim_fold_cmd(
+    plan_json: str = typer.Option(..., help="A FoldPlan / demo result JSON."),
+    out: str = typer.Option("runs/sim/fold_demo.mp4", help="Output video (.mp4 / .gif)."),
+    level: str = typer.Option("ee-only", help="ee-only | arm-ik | cloth-proxy."),
+    fps: int = typer.Option(20),
+    max_seconds: float = typer.Option(10.0, help="Cap the (time-compressed) video length."),
+    width: int = typer.Option(640),
+    height: int = typer.Option(480),
+    use_mujoco: bool = typer.Option(False, "--use-mujoco", help="Force the MuJoCo 3D scene."),
+):
+    """Simulate the planned fold (virtual SO-101 / end-effector). SIMULATION ONLY.
+
+    ee-only / cloth-proxy work without MuJoCo (2D top-down renderer). arm-ik needs
+    MuJoCo:  python3 -m pip install -e ".[sim]".  No motor commands are ever sent.
+    """
+    from terafold.sim.fold_sim import run_sim_fold
+
+    res = run_sim_fold(
+        plan_json, out=out, level=level, fps=fps, max_seconds=max_seconds,
+        width=width, height=height, use_mujoco=use_mujoco, on_log=_echo,
+    )
+    status = res.get("status")
+    if status == "missing_dependency":
+        _err(res["message"])
+        _err(f"Run:  {res['install_command']}")
+        raise typer.Exit(1)
+    if status == "error":
+        _err(res["error"])
+        if res.get("hint"):
+            _echo(res["hint"])
+        raise typer.Exit(1)
+    _ok(f"sim-fold complete ({res['renderer']}, {res['frames']} frames, ~{res['duration_s']}s).")
+    _echo(f"  video : {res.get('video') or res.get('out')}")
+    _echo(f"  meta  : {res.get('meta_json')}")
+    _echo(f"  {res.get('note')}")
+
+
 def main() -> None:  # console-script friendly
     app()
 
