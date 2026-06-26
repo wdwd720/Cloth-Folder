@@ -296,6 +296,42 @@ Flags: `--all-views` (iso/top/side/gripper), `--save-frames` (PNG export),
 waypoint dots; on by default for `so101-real`). To use a real SO-101 model, point
 `$TERAFOLD_SO101_MJCF` at an MJCF file and it will be picked up automatically.
 
+#### Demo-quality folding (`--level cloth-physics-proxy`) — **best for demos**
+
+The convincing fold: the SO-101 arm (driven by **Jacobian IK** so the gripper
+actually reaches the cloth) grasps the towel's right edge, lifts, arcs over the
+crease, and places it on the left. The towel is a **deforming grid mesh** (a
+kinematic cloth proxy) — the grasped edge follows the gripper, the moving half
+hinges over the crease with sag, cloth never goes below the table, and the folded
+half rests on top with its **underside shaded differently**. Debug objects show
+the active grasp point, gripper contact point, moving edge, crease, waypoint dots,
+and an EE trail; a large **phase subtitle** (pregrasp→…→inspect) tracks progress;
+and the video ends with a **success/fail evaluation** overlay (also written to the
+meta JSON: `fold_visually_successful`, `final_edge_error_m`, `crossed_crease`,
+`settled_on_target_side`).
+
+```bash
+# Best-looking single-view demo:
+python3 -m terafold sim-fold --plan-json runs/demo_image/claude_result.json \
+    --level cloth-physics-proxy --view demo --slowmo --out runs/sim/fold_best_demo.mp4
+
+# 2x2 review grid (top / side / contact / demo):
+python3 -m terafold sim-fold --plan-json runs/demo_image/claude_result.json \
+    --level cloth-physics-proxy --view split --slowmo --out runs/sim/fold_review_grid.mp4
+
+# Close-up on the gripper/cloth contact, slow:
+python3 -m terafold sim-fold --plan-json runs/demo_image/claude_result.json \
+    --level cloth-physics-proxy --view contact --slowmo --out runs/sim/fold_contact_slowmo.mp4
+open runs/sim/fold_best_demo.mp4
+```
+
+Fold-judging camera presets: `--view demo` (best 3/4 angle), `contact` (gripper
+close-up), `cloth` (cloth deformation), `split` (2x2 grid). An experimental
+`--level mujoco-cloth` probes MuJoCo deformable flex; if it isn't practical it
+prints *"MuJoCo deformable cloth unavailable or unstable; using
+cloth-physics-proxy recommended."* and falls back to `cloth-physics-proxy` (no
+faked success).
+
 Levels:
 - `ee-only` (default) — end-effector sphere follows the path; **always works**
   (2D top-down renderer, no MuJoCo needed). Saves `runs/sim/fold_ee.mp4`.
@@ -304,6 +340,9 @@ Levels:
 - `arm-ik` — a simple 6-DOF arm follows via MuJoCo (needs `pip install -e ".[sim]"`;
   without it you get a clear install message).
 - `so101-real` — the realistic 5-DOF SO-101 approximation (see above).
+- `cloth-physics-proxy` — **best demo**: SO-101 arm (IK) + deforming cloth grid
+  mesh + contact debug + success evaluation (see above).
+- `mujoco-cloth` — experimental; falls back to `cloth-physics-proxy`.
 
 Each run also writes `<out>.meta.json` (level, view, renderer, frames, fps, fold
 direction, SO-101 asset report, `control: none (simulation only)`,

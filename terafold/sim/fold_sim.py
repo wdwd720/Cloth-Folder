@@ -29,9 +29,13 @@ from typing import Any, Dict, List, Optional, Tuple
 import numpy as np
 
 SIM_BANNER = "SIMULATION ONLY — not calibrated to real hardware."
-LEVELS = ("ee-only", "arm-ik", "cloth-proxy", "so101-real")
-MUJOCO_LEVELS = ("arm-ik", "so101-real")  # levels that require a 3D MuJoCo arm
+LEVELS = ("ee-only", "arm-ik", "cloth-proxy", "so101-real",
+          "cloth-physics-proxy", "mujoco-cloth")
+CLOTH_PHYSICS_LEVELS = ("cloth-physics-proxy", "mujoco-cloth")
+ARM_LEVELS = ("arm-ik", "so101-real", "cloth-physics-proxy", "mujoco-cloth")
+MUJOCO_LEVELS = ARM_LEVELS  # levels that require a 3D MuJoCo arm
 ALL_VIEWS = ("iso", "top", "side", "gripper")
+SPLIT_VIEWS = ("top", "side", "contact", "demo")  # 2x2 grid for --view split
 SLOWMO_FACTOR = 2.5
 SIM_INSTALL_HINT = 'python3 -m pip install -e ".[sim]"'
 
@@ -44,6 +48,25 @@ def have_mujoco() -> bool:
 
 def _have_imageio() -> bool:
     return importlib.util.find_spec("imageio") is not None
+
+
+def _mujoco_flex_available() -> bool:
+    """Best-effort probe: does the installed MuJoCo compile a minimal flex cloth?"""
+    if not have_mujoco():
+        return False
+    try:
+        import mujoco
+
+        xml = (
+            '<mujoco><worldbody>'
+            '<flexcomp name="cloth" type="grid" count="4 4 1" spacing="0.05 0.05 0.05" '
+            'dim="2" mass="0.1"><edge equality="true"/></flexcomp>'
+            '</worldbody></mujoco>'
+        )
+        mujoco.MjModel.from_xml_string(xml)
+        return True
+    except Exception:
+        return False
 
 
 # --------------------------------------------------------------------------
@@ -230,7 +253,36 @@ def _banner(img, text):
         img[:24] = (170, 30, 30)  # red banner without text
 
 
-def _overlay(img, top_text, bottom_text=None):
+_FONT_CACHE: Dict[int, Any] = {}
+_FONT_PATHS = (
+    "/System/Library/Fonts/Supplemental/Arial Bold.ttf",
+    "/System/Library/Fonts/Supplemental/Arial.ttf",
+    "/System/Library/Fonts/Helvetica.ttc",
+    "/usr/share/fonts/truetype/dejavu/DejaVuSans-Bold.ttf",
+    "/usr/share/fonts/truetype/dejavu/DejaVuSans.ttf",
+)
+
+
+def _load_font(size):
+    if size in _FONT_CACHE:
+        return _FONT_CACHE[size]
+    font = None
+    try:
+        from PIL import ImageFont
+
+        for p in _FONT_PATHS:
+            if os.path.exists(p):
+                font = ImageFont.truetype(p, size)
+                break
+        if font is None:
+            font = ImageFont.load_default()
+    except Exception:
+        font = None
+    _FONT_CACHE[size] = font
+    return font
+
+
+def _overlay(img, top_text, bottom_text=None, big=False):
     """Top safety banner + optional bottom phase subtitle (PIL if available)."""
     h, w = img.shape[:2]
     try:
@@ -238,16 +290,50 @@ def _overlay(img, top_text, bottom_text=None):
 
         pil = Image.fromarray(np.ascontiguousarray(img[:, :, :3]))
         dr = ImageDraw.Draw(pil)
-        dr.rectangle([0, 0, w, 24], fill=(170, 30, 30))
-        dr.text((8, 6), top_text, fill=(255, 255, 255))
+        top_h = max(22, h // 22)
+        dr.rectangle([0, 0, w, top_h], fill=(170, 30, 30))
+        dr.text((8, max(3, top_h // 5)), top_text, fill=(255, 255, 255),
+                font=_load_font(max(12, h // 34)))
         if bottom_text:
-            dr.rectangle([0, h - 24, w, h], fill=(20, 22, 28))
-            dr.text((8, h - 18), bottom_text, fill=(240, 240, 120))
+            bh = max(28, h // 12) if big else 24
+            dr.rectangle([0, h - bh, w, h], fill=(18, 20, 26))
+            dr.text((10, h - bh + max(3, bh // 6)), bottom_text, fill=(245, 240, 120),
+                    font=_load_font(max(16, h // 18) if big else 14))
         img[:, :, :3] = np.asarray(pil)
     except Exception:
         img[:24] = (170, 30, 30)
         if bottom_text:
-            img[h - 24:] = (20, 22, 28)
+            img[h - 24:] = (18, 20, 26)
+
+
+def _eval_overlay(img, metrics):
+    """Draw a success/fail evaluation panel for the final held frames."""
+    h, w = img.shape[:2]
+    ok = bool(metrics.get("fold_visually_successful"))
+    label = "FOLD SUCCESS" if ok else "FOLD INCOMPLETE"
+    lines = [
+        f"crossed crease:        {metrics.get('crossed_crease')}",
+        f"on target side:        {metrics.get('settled_on_target_side')}",
+        f"final edge error:      {metrics.get('final_edge_error_m')} m",
+    ]
+    try:
+        from PIL import Image, ImageDraw
+
+        pil = Image.fromarray(np.ascontiguousarray(img[:, :, :3]))
+        dr = ImageDraw.Draw(pil)
+        pw, ph = int(w * 0.62), int(h * 0.34)
+        x0, y0 = (w - pw) // 2, int(h * 0.30)
+        dr.rectangle([x0, y0, x0 + pw, y0 + ph], fill=(18, 20, 26))
+        col = (90, 230, 120) if ok else (240, 110, 90)
+        dr.rectangle([x0, y0, x0 + pw, y0 + ph], outline=col, width=3)
+        dr.text((x0 + 14, y0 + 10), label, fill=col, font=_load_font(max(20, h // 16)))
+        f = _load_font(max(13, h // 30))
+        for k, line in enumerate(lines):
+            dr.text((x0 + 16, y0 + 14 + (k + 1) * max(20, h // 18) + 8), line,
+                    fill=(235, 235, 240), font=f)
+        img[:, :, :3] = np.asarray(pil)
+    except Exception:
+        img[int(h * 0.30):int(h * 0.30) + 4] = (90, 230, 120) if ok else (240, 110, 90)
 
 
 def _moving_half(corners, direction, f):
@@ -381,9 +467,13 @@ VIEW_PRESETS = {
     "top": (90.0, -89.0),
     "side": (90.0, -10.0),
     "follow-ee": (45.0, -28.0),
-    "gripper": (35.0, -22.0),  # close-up that tracks the gripper
+    "gripper": (35.0, -22.0),    # close-up that tracks the gripper
+    "demo": (55.0, -27.0),       # best overall 3/4 angle for judging the fold
+    "contact": (40.0, -16.0),    # close-up on the gripper/cloth contact
+    "cloth": (70.0, -40.0),      # framed on the cloth deformation
 }
-_FOLLOW_VIEWS = ("follow-ee", "gripper")
+# Views that track the moving contact point (close-ups, no whole-scene framing).
+_FOLLOW_VIEWS = ("follow-ee", "gripper", "contact")
 
 
 def _scene_bounds(waypoints, scene) -> Dict[str, np.ndarray]:
@@ -417,6 +507,12 @@ def _make_camera(view, bounds, fovy):
         dist = max(bounds["radius"] * 2.2, 0.30)
     elif view == "gripper":
         dist = max(bounds["radius"] * 1.1, 0.20)  # tight close-up
+    elif view == "contact":
+        dist = max(bounds["radius"] * 0.95, 0.18)  # very close, tracks contact
+    elif view == "demo":
+        dist = fit * 1.05 + 0.10  # best overall 3/4 framing
+    elif view == "cloth":
+        dist = fit * 0.85 + 0.05  # framed on the cloth
     cam.azimuth, cam.elevation, cam.distance = az, el, dist
     return cam, {"azimuth": az, "elevation": el, "distance": dist, "fovy": fovy,
                  "lookat": bounds["center"].tolist()}
@@ -482,42 +578,192 @@ def _add_waypoint_dots(scene_obj, waypoints, rgba=(0.85, 0.35, 0.95, 0.9)):
         scene_obj.ngeom += 1
 
 
-def _setup_so101(model, data, level):
-    """For so101-real: set a sensible home pose and return gripper actuator ids."""
+def _sphere(scene_obj, pos, r, rgba):
     import mujoco
 
+    if scene_obj.ngeom >= scene_obj.maxgeom:
+        return
+    g = scene_obj.geoms[scene_obj.ngeom]
+    mujoco.mjv_initGeom(g, mujoco.mjtGeom.mjGEOM_SPHERE,
+                        np.array([r, 0.0, 0.0]), np.ascontiguousarray(pos, np.float64),
+                        np.eye(3).flatten(), np.array(rgba, np.float32))
+    scene_obj.ngeom += 1
+
+
+def _draw_cloth(scene_obj, cloth, fold_f):
+    """Draw the cloth grid as shaded oriented boxes (one per cell)."""
+    import mujoco
+
+    centers, mats, sizes, cols = cloth.mesh_geoms(fold_f=fold_f)
+    for k in range(centers.shape[0]):
+        if scene_obj.ngeom >= scene_obj.maxgeom:
+            break
+        if sizes[k, 0] <= 1e-6 or sizes[k, 1] <= 1e-6:
+            continue
+        g = scene_obj.geoms[scene_obj.ngeom]
+        mujoco.mjv_initGeom(g, mujoco.mjtGeom.mjGEOM_BOX,
+                            np.ascontiguousarray(sizes[k], np.float64),
+                            np.ascontiguousarray(centers[k], np.float64),
+                            np.ascontiguousarray(mats[k], np.float64),
+                            cols[k].astype(np.float32))
+        scene_obj.ngeom += 1
+
+
+def _draw_contact_debug(scene_obj, grasp_pt, contact_pt, edge_pts, unreachable_pt=None):
+    _sphere(scene_obj, grasp_pt, 0.013, (1.0, 0.92, 0.12, 1.0))       # active grasp point
+    _sphere(scene_obj, contact_pt, 0.010, (1.0, 0.25, 0.22, 1.0))     # gripper contact point
+    for p in edge_pts:
+        _sphere(scene_obj, p, 0.005, (0.95, 0.55, 0.12, 1.0))         # moving edge
+    if unreachable_pt is not None:
+        _sphere(scene_obj, unreachable_pt, 0.018, (1.0, 0.05, 0.05, 1.0))
+
+
+def _tile_2x2(imgs, w, h):
+    """Composite four frames into a 2x2 grid of size (h, w)."""
+    try:
+        from PIL import Image
+
+        hw, hh = w // 2, h // 2
+        canvas = Image.new("RGB", (w, h), (12, 13, 16))
+        for k, im in enumerate(imgs[:4]):
+            tile = Image.fromarray(np.ascontiguousarray(im[:, :, :3])).resize((hw, hh))
+            canvas.paste(tile, ((k % 2) * hw, (k // 2) * hh))
+        return np.array(canvas)  # writable copy (asarray would be read-only)
+    except Exception:
+        out = np.zeros((h, w, 3), np.uint8)
+        hw, hh = w // 2, h // 2
+        for k, im in enumerate(imgs[:4]):
+            t = im[::2, ::2, :3][:hh, :hw]
+            out[(k // 2) * hh:(k // 2) * hh + t.shape[0],
+                (k % 2) * hw:(k % 2) * hw + t.shape[1]] = t
+        return out
+
+
+_ARM_JOINTS = {
+    "arm-ik": ["j0", "j1", "j2", "j3", "j4", "j5"],
+    "so101-real": ["j_base", "j_shoulder", "j_elbow", "j_wristpitch", "j_wristroll"],
+}
+_EE_BODY = {"arm-ik": "gripper", "so101-real": "gripper_base"}
+
+
+def _arm_ik_setup(model, data, level):
+    """Discover the arm's IK joints, EE body, finger joints; set a home pose.
+
+    Returns a dict with qpos/dof addresses for the arm joints, the EE body id,
+    finger qpos addresses + travel, and the joint ranges — or None for non-arm
+    levels.
+    """
+    import mujoco
+
+    base_level = "so101-real" if level in CLOTH_PHYSICS_LEVELS else level
+    if base_level not in _ARM_JOINTS:
+        return None
     from terafold.sim import so101
 
-    grip_acts = []
-    if level != "so101-real":
-        return grip_acts, 0.0
-    for jname, deg in so101.SO101_SPEC["home_deg"].items():
+    qadr, dofadr, jrange = [], [], []
+    for jn in _ARM_JOINTS[base_level]:
         try:
-            data.qpos[model.joint(jname).qposadr[0]] = np.radians(deg)
+            j = model.joint(jn)
+        except Exception:
+            continue
+        qadr.append(int(j.qposadr[0]))
+        dofadr.append(int(j.dofadr[0]))
+        lo, hi = float(j.range[0]), float(j.range[1])
+        jrange.append((lo, hi))
+    # Home pose for SO-101 (radians).
+    if base_level == "so101-real":
+        for jn, deg in so101.SO101_SPEC["home_deg"].items():
+            try:
+                data.qpos[model.joint(jn).qposadr[0]] = np.radians(deg)
+            except Exception:
+                pass
+    finger_qadr = []
+    for fn in ("grip_left", "grip_right"):
+        try:
+            finger_qadr.append(int(model.joint(fn).qposadr[0]))
         except Exception:
             pass
     mujoco.mj_forward(model, data)
-    for aname in so101.SO101_GRIPPER_ACTUATORS:
-        try:
-            grip_acts.append(model.actuator(aname).id)
-        except Exception:
-            pass
-    return grip_acts, so101.SO101_SPEC["finger_travel"]
+    return {
+        "qadr": qadr, "dofadr": dofadr, "jrange": jrange,
+        "ee_body": model.body(_EE_BODY[base_level]).id,
+        "finger_qadr": finger_qadr,
+        "gmax": so101.SO101_SPEC["finger_travel"],
+    }
+
+
+def _ik_solve(model, data, target, ik, jacp, jacr, iters, tol, lam):
+    dof, qadr, eb = ik["dofadr"], ik["qadr"], ik["ee_body"]
+    import mujoco
+
+    for _ in range(iters):
+        mujoco.mj_forward(model, data)
+        err = np.asarray(target) - data.body(eb).xpos
+        if float(np.linalg.norm(err)) < tol:
+            break
+        mujoco.mj_jacBody(model, data, jacp, jacr, eb)
+        J = jacp[:, dof]
+        dq = J.T @ np.linalg.solve(J @ J.T + (lam * lam) * np.eye(3), err)
+        dq = np.clip(dq, -0.3, 0.3)
+        for k, qa in enumerate(qadr):
+            v = data.qpos[qa] + dq[k]
+            lo, hi = ik["jrange"][k]
+            if hi > lo:
+                v = min(max(v, lo), hi)
+            data.qpos[qa] = v
+    mujoco.mj_forward(model, data)
+    return float(np.linalg.norm(np.asarray(target) - data.body(eb).xpos))
+
+
+# Deterministic restart perturbations (radians) to escape IK local minima.
+_IK_SEEDS = (0.0, 0.7, -0.7, 1.3, -1.3)
+
+
+def _ik(model, data, target, ik, iters: int = 70, tol: float = 0.002, lam: float = 0.06):
+    """DLS position IK with deterministic restarts; sets arm qpos to reach target."""
+    import mujoco
+
+    nv = model.nv
+    jacp = np.zeros((3, nv))
+    jacr = np.zeros((3, nv))
+    qadr = ik["qadr"]
+    base_q = np.array([data.qpos[qa] for qa in qadr])
+    best_q, best_err = base_q.copy(), np.inf
+    for seed in _IK_SEEDS:
+        if seed != 0.0:  # warm-start first, then perturbed restarts if needed
+            for k, qa in enumerate(qadr):
+                data.qpos[qa] = base_q[k] + seed * ((-1) ** k)
+        err = _ik_solve(model, data, target, ik, jacp, jacr, iters, tol, lam)
+        if err < best_err:
+            best_err = err
+            best_q = np.array([data.qpos[qa] for qa in qadr])
+        if best_err < 0.02:
+            break
+    for k, qa in enumerate(qadr):
+        data.qpos[qa] = best_q[k]
+    mujoco.mj_forward(model, data)
+    return best_err
 
 
 def _render_mujoco(level, waypoints, gripper, times, phases, scene, w, h, fps, max_seconds, log,
                    view: str = "iso", waypoint_dots: bool = False,
-                   debug_xml_path: Optional[str] = None) -> List[np.ndarray]:
+                   debug_xml_path: Optional[str] = None):
+    """Returns ``(frames, info)``; ``info`` holds fold metrics + warnings."""
     import mujoco  # noqa: F401
 
+    from terafold.sim.cloth import ClothGrid
+
     ee, grip, ph, duration, n_frames = _timeline(waypoints, gripper, times, phases, fps, max_seconds)
-    fold = _fold_fraction(ee[:, :2], grip, scene["grasp"], scene["place"]) if level == "cloth-proxy" \
-        else np.zeros(n_frames)
+    use_cloth = level in CLOTH_PHYSICS_LEVELS
+    # Fold fraction drives both the cloth-proxy hinge and the cloth-physics mesh.
+    fold = (_fold_fraction(ee[:, :2], grip, scene["grasp"], scene["place"])
+            if level in ("cloth-proxy",) + CLOTH_PHYSICS_LEVELS else np.zeros(n_frames))
+    info: Dict[str, Any] = {"metrics": None, "warnings": []}
     xml = _build_mjcf(level, scene, ee, w, h)
     try:
         model = mujoco.MjModel.from_xml_string(xml)
         data = mujoco.MjData(model)
-        renderer = mujoco.Renderer(model, height=h, width=w)
+        renderer = mujoco.Renderer(model, height=h, width=w, max_geom=24000)
         mocap_id = model.body("ee").mocapid[0]
         hinge_qadr = None
         if level == "cloth-proxy":
@@ -525,44 +771,111 @@ def _render_mujoco(level, waypoints, gripper, times, phases, scene, w, h, fps, m
                 hinge_qadr = model.joint("fold_hinge").qposadr[0]
             except Exception:
                 hinge_qadr = None
-        grip_acts, grip_close = _setup_so101(model, data, level)
-        substeps = 60 if level == "so101-real" else 40
+        ik = _arm_ik_setup(model, data, level)
 
-        # Auto-fit a free camera to the whole trajectory + table.
+        cloth = None
+        if use_cloth:
+            cloth = ClothGrid(scene["corners"], scene["direction"],
+                              scene["crease_a"], scene["crease_b"],
+                              z_table=0.0, grasp_xy=scene["grasp"])
+
         bounds = _scene_bounds(waypoints, scene)
         fovy = float(model.vis.global_.fovy)
-        cam, cam_info = _make_camera(view, bounds, fovy)
-        # Follow/gripper views are intentional close-ups that track the EE, so a
-        # "whole trajectory doesn't fit" warning would be expected noise there.
-        if view not in _FOLLOW_VIEWS:
-            warn = _framing_warning(view, cam_info, bounds)
-            if warn:
-                log(warn)
-        log(f"   camera: view={view} az={cam_info['azimuth']} el={cam_info['elevation']} "
-            f"dist={cam_info['distance']:.2f} target={np.round(cam_info['lookat'], 3).tolist()}")
+        view_list = list(SPLIT_VIEWS) if view == "split" else [view]
+        cams = [(v, _make_camera(v, bounds, fovy)) for v in view_list]
+        for v, (_cam, cinfo) in cams:
+            if v not in _FOLLOW_VIEWS:
+                warn = _framing_warning(v, cinfo, bounds)
+                if warn:
+                    log(warn)
+        log(f"   camera: view={view} ({'2x2 grid' if view == 'split' else 'single'}) "
+            f"target={np.round(bounds['center'], 3).tolist()}")
+
+        warned_phases: set = set()
+        unreachable: List[int] = []
+        prev_unreach = False
+
+        def decorate(scene_obj, i, unreach_pt):
+            if cloth is not None:
+                _draw_cloth(scene_obj, cloth, float(fold[i]))
+                _draw_contact_debug(scene_obj, cloth.grasp_point(), ee[i],
+                                    cloth.moving_edge_points(), unreach_pt)
+            _add_trail(scene_obj, ee[: i + 1])
+            if waypoint_dots:
+                _add_waypoint_dots(scene_obj, waypoints)
 
         frames: List[np.ndarray] = []
         for i in range(n_frames):
             data.mocap_pos[mocap_id] = ee[i]
             if hinge_qadr is not None:
                 data.qpos[hinge_qadr] = float(fold[i]) * np.pi
-            # Gripper open(1)/close(0) from the trajectory -> finger close ctrl.
-            for aid in grip_acts:
-                data.ctrl[aid] = (1.0 - float(grip[i])) * grip_close
-            if level in ("arm-ik", "so101-real"):
-                for _ in range(substeps):  # weld constraint pulls the arm to the EE
-                    mujoco.mj_step(model, data)
+            unreach_pt = None
+            if ik is not None:
+                ik_err = _ik(model, data, ee[i], ik)
+                for qa in ik["finger_qadr"]:
+                    data.qpos[qa] = (1.0 - float(grip[i])) * ik["gmax"]
+                mujoco.mj_forward(model, data)
+                # Flag genuinely-unreachable contact waypoints (ignore retreat/inspect,
+                # where the gripper intentionally lifts away from the cloth).
+                leaving = any(k in ph[i] for k in ("retreat", "inspect", "pregrasp"))
+                if ik_err > 0.05 and not leaving:
+                    unreach_pt = ee[i]
+                    unreachable.append(i)
+                    if not prev_unreach:
+                        log(f"[warn] unreachable waypoint {i}")
+                    prev_unreach = True
+                else:
+                    prev_unreach = False
             else:
                 mujoco.mj_forward(model, data)
-            if view in _FOLLOW_VIEWS:
-                cam.lookat[:] = ee[i]
-            renderer.update_scene(data, camera=cam)
-            _add_trail(renderer.scene, ee[: i + 1])  # EE trail overlay
-            if waypoint_dots:
-                _add_waypoint_dots(renderer.scene, waypoints)
-            img = renderer.render().copy()
-            _overlay(img, f"{SIM_BANNER}  [{level}]", f"phase: {ph[i]}")
+
+            # Cloth follows the gripper (grasped edge snaps to the EE).
+            if cloth is not None:
+                cloth.update(float(fold[i]), handle=ee[i], grasped=float(grip[i]) < 0.5)
+
+            # Contact warning during close/place if the gripper is off the cloth plane.
+            phase = ph[i]
+            if any(k in phase for k in ("close", "place")) and phase not in warned_phases:
+                if abs(float(ee[i, 2]) - 0.0) > 0.02:
+                    msg = f"[warn] gripper not contacting cloth during phase {phase}"
+                    log(msg)
+                    info["warnings"].append(msg)
+                    warned_phases.add(phase)
+
+            if view == "split":
+                subs = []
+                for v, (cam, _ci) in cams:
+                    if v in _FOLLOW_VIEWS:
+                        cam.lookat[:] = (cloth.grasp_point() if (cloth is not None and v == "contact")
+                                         else ee[i])
+                    renderer.update_scene(data, camera=cam)
+                    decorate(renderer.scene, i, unreach_pt)
+                    sub = renderer.render().copy()
+                    _overlay(sub, v, None)
+                    subs.append(sub)
+                img = _tile_2x2(subs, w, h)
+                _overlay(img, f"{SIM_BANNER}  [{level}]", f"phase: {ph[i]}", big=True)
+            else:
+                _vname, (cam, _ci) = cams[0]
+                if view in _FOLLOW_VIEWS:
+                    cam.lookat[:] = (cloth.grasp_point() if (cloth is not None and view == "contact")
+                                     else ee[i])
+                renderer.update_scene(data, camera=cam)
+                decorate(renderer.scene, i, unreach_pt)
+                img = renderer.render().copy()
+                _overlay(img, f"{SIM_BANNER}  [{level}]", f"phase: {ph[i]}", big=True)
             frames.append(img)
+
+        # Success evaluation overlay held at the end of the video.
+        if cloth is not None:
+            metrics = cloth.success_metrics(scene["place"])
+            info["metrics"] = metrics
+            hold = max(6, int(fps * 1.5))
+            last = frames[-1].copy()
+            _eval_overlay(last, metrics)
+            frames.extend([last.copy() for _ in range(hold)])
+        if unreachable:
+            log(f"   {len(unreachable)} unreachable frame(s); EE shown in red there.")
         renderer.close()
     except Exception as exc:
         # Req 6: on any MuJoCo failure, dump the exact MJCF and surface a snippet.
@@ -580,8 +893,8 @@ def _render_mujoco(level, waypoints, gripper, times, phases, scene, w, h, fps, m
             + (f"\nMJCF written to: {path}" if path else "")
             + f"\n--- MJCF (head) ---\n{snippet}"
         ) from exc
-    log(f"   MuJoCo renderer: {n_frames} frames @ {fps}fps (level={level})")
-    return frames
+    log(f"   MuJoCo renderer: {len(frames)} frames @ {fps}fps (level={level})")
+    return frames, info
 
 
 def make_link_inertial(mass: float = 0.05, inertia: float = 1e-4) -> str:
@@ -656,23 +969,29 @@ def _build_mjcf(level, scene, ee, w, h) -> str:
     ee_geom = '<geom name="ee_sphere" type="sphere" size="0.016" rgba="0.95 0.2 0.18 1"/>'
     if level == "arm-ik":
         arm_xml = _arm_chain(span, cx - 0.5 * span, cy)
-        # Weld the gripper to the EE mocap so the arm follows the planned path.
-        weld_xml = '<equality><weld body1="gripper" body2="ee" solref="0.02 1"/></equality>'
-        defaults_xml = '<default><joint damping="3" armature="0.05" limited="false"/></default>'
-    elif level == "so101-real":
+        # Arm is driven kinematically by Jacobian IK (see _ik) — no weld/actuators.
+        weld_xml = ""
+        defaults_xml = '<default><joint damping="1" armature="0.01" limited="false"/></default>'
+    elif level in ("so101-real",) + CLOTH_PHYSICS_LEVELS:
         from terafold.sim import so101
 
-        base_off = max(0.55 * span, 0.20)
-        arm = so101.build_so101_arm((cx, cy - base_off), base_z=0.0)
+        base_off = max(0.5 * span, 0.18)
+        base = np.array([cx, cy - base_off, so101.SO101_SPEC["base_height"]])
+        needed = float(np.linalg.norm(ee[:, :3] - base, axis=1).max())
+        reach_scale = float(np.clip(needed / (so101.nominal_reach() * 0.88), 1.0, 1.6))
+        arm = so101.build_so101_arm((cx, cy - base_off), base_z=0.0, reach_scale=reach_scale)
         arm_xml = arm["body_xml"]
-        weld_xml = arm["weld_xml"]
-        actuator_xml = arm["actuator_xml"]
+        # Arm is driven kinematically by Jacobian IK (see _ik) — no weld/actuators.
+        weld_xml = ""
+        actuator_xml = ""
         extra_materials = arm["materials_xml"]
-        defaults_xml = ('<default><joint damping="5" armature="0.1"/>'
-                        '<position kp="30"/></default>')
-        # The real gripper renders at the EE; keep only a tiny weld-target marker.
+        defaults_xml = '<default><joint damping="1" armature="0.01"/></default>'
+        # The real gripper renders at the EE; keep only a tiny target marker.
         ee_geom = '<geom name="ee_sphere" type="sphere" size="0.006" rgba="0.95 0.3 0.3 0.6"/>'
 
+    # cloth-physics levels draw the towel as a deforming mesh (decorative geoms),
+    # so the rigid towel box is omitted.
+    draw_rigid_towel = level not in CLOTH_PHYSICS_LEVELS
     cloth_moving = ""
     if level == "cloth-proxy":
         cmid = 0.5 * (scene["crease_a"] + scene["crease_b"])
@@ -684,8 +1003,10 @@ def _build_mjcf(level, scene, ee, w, h) -> str:
       <geom type="box" pos="{float(ctr[0]-cmid[0])} {float(ctr[1]-cmid[1])} 0" size="{0.25*span} {0.5*span} 0.002" material="towel_moving"/>
     </body>"""
         static_geom = f'<geom name="towel" type="box" pos="{cx} {cy} 0" size="{0.5*span} {0.5*span} 0.002" material="towel"/>'
-    else:
+    elif draw_rigid_towel:
         static_geom = f'<geom name="towel" type="box" pos="{cx} {cy} 0.002" size="{0.5*span} {0.5*span} 0.0015" material="towel"/>'
+    else:
+        static_geom = ""  # cloth drawn as a deforming mesh (decorative geoms)
 
     ca, cb = scene["crease_a"], scene["crease_b"]
     cl = max(0.5 * span, 0.05)  # frame-axis length
@@ -823,17 +1144,30 @@ def run_sim_fold(
         else:
             use_mj = True
 
-    # so101-real: report which SO-101 assets were found / used.
+    # PART 3: mujoco-cloth attempts MuJoCo deformable cloth; if not practical we
+    # fall back to the reliable cloth-physics-proxy (no faked success).
+    render_level = level
+    mujoco_cloth_meta = None
+    if level == "mujoco-cloth":
+        flex = _mujoco_flex_available() if have_mujoco() else False
+        log("MuJoCo deformable cloth unavailable or unstable; using cloth-physics-proxy recommended.")
+        mujoco_cloth_meta = {"attempted": True, "flex_available": bool(flex), "used": False,
+                             "fell_back_to": "cloth-physics-proxy"}
+        render_level = "cloth-physics-proxy"
+
+    # so101-real / cloth-physics: report which SO-101 assets were found / used.
     asset_report = None
-    if level == "so101-real":
+    if render_level in ("so101-real",) + CLOTH_PHYSICS_LEVELS:
         from terafold.sim import so101
 
         asset_report = so101.find_so101_assets()
-        log(f"   SO-101 assets: {'official ' + str(asset_report['type']) + ' @ ' + str(asset_report['path']) if asset_report['found'] else 'approximation (no official assets found)'}")
+        which = (f"official {asset_report['type']} @ {asset_report['path']}"
+                 if asset_report["found"] else "approximation (no official assets found)")
+        log(f"   SO-101 assets: {which}")
 
     eff_max = max_seconds * (SLOWMO_FACTOR if slowmo else 1.0)
     if waypoint_dots is None:
-        waypoint_dots = level == "so101-real"  # default-on for the realistic arm
+        waypoint_dots = render_level in ("so101-real",) + CLOTH_PHYSICS_LEVELS
 
     if all_views and use_mj:
         views = list(ALL_VIEWS)
@@ -846,6 +1180,8 @@ def run_sim_fold(
     frames_dirs: Dict[str, str] = {}
     renderer = "2d"
     render_error = None
+    metrics = None
+    warnings: List[str] = []
     n_frames = 0
 
     for v in views:
@@ -854,10 +1190,12 @@ def run_sim_fold(
         if use_mj:
             debug_xml = os.path.splitext(out_v)[0] + ".mjcf.xml"
             try:
-                frames = _render_mujoco(level, waypoints, gripper, times, phases, scene,
-                                        width, height, fps, eff_max, log, view=v,
-                                        waypoint_dots=waypoint_dots, debug_xml_path=debug_xml)
+                frames, rinfo = _render_mujoco(render_level, waypoints, gripper, times, phases,
+                                               scene, width, height, fps, eff_max, log, view=v,
+                                               waypoint_dots=waypoint_dots, debug_xml_path=debug_xml)
                 renderer = "mujoco"
+                metrics = rinfo.get("metrics") or metrics
+                warnings += rinfo.get("warnings") or []
             except Exception as exc:
                 render_error = str(exc)
                 if requires_mujoco:
@@ -872,7 +1210,7 @@ def run_sim_fold(
                     }
                 log(f"[warn] MuJoCo render failed ({exc}); falling back to the 2D renderer.")
         if frames is None:
-            frames = _render_2d(level, waypoints, gripper, times, phases, scene,
+            frames = _render_2d(render_level, waypoints, gripper, times, phases, scene,
                                 width, height, fps, eff_max, log)
             renderer = "2d"
         n_frames = len(frames)
@@ -886,6 +1224,7 @@ def run_sim_fold(
     meta = {
         "status": "ok",
         "level": level,
+        "render_level": render_level,
         "view": primary_view,
         "views": outputs,
         "all_views": bool(all_views and use_mj),
@@ -905,6 +1244,12 @@ def run_sim_fold(
         "note": SIM_BANNER,
         "source_plan": plan_json,
     }
+    if metrics is not None:
+        meta.update(metrics)  # fold_visually_successful, final_edge_error_m, ...
+    if warnings:
+        meta["warnings"] = warnings
+    if mujoco_cloth_meta is not None:
+        meta["mujoco_cloth"] = mujoco_cloth_meta
     if asset_report is not None:
         meta["so101_assets"] = asset_report
     if frames_dirs:

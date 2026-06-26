@@ -229,7 +229,7 @@ def test_find_so101_assets_returns_report():
     assert isinstance(rep["found"], bool)
 
 
-def test_so101_mjcf_valid_masses_and_gripper_actuators(tmp_path):
+def test_so101_mjcf_valid_masses_and_gripper_joints(tmp_path):
     mujoco = pytest.importorskip("mujoco")
     from terafold.sim import so101
     from terafold.sim.fold_sim import _build_mjcf, load_plan, parse_trajectory
@@ -241,9 +241,9 @@ def test_so101_mjcf_valid_masses_and_gripper_actuators(tmp_path):
         bid = model.body(name).id
         assert model.body_mass[bid] > 1e-6, f"{name} mass must be > 0"
         assert np.all(model.body_inertia[bid] > 0.0), f"{name} inertia must be > 0"
-    assert model.nu >= 2  # two parallel-gripper actuators
-    for a in so101.SO101_GRIPPER_ACTUATORS:
-        assert model.actuator(a).id >= 0
+    # Two parallel-gripper finger joints (driven kinematically by the renderer).
+    for jn in ("grip_left", "grip_right"):
+        assert model.joint(jn).id >= 0
 
 
 def test_so101_real_requires_mujoco_message(tmp_path, monkeypatch):
@@ -323,3 +323,149 @@ def test_so101_real_slowmo_lengthens_playback(tmp_path):
         pytest.skip("mujoco render unavailable")
     assert slow["frames"] > base["frames"]
     assert slow["slowmo"] is True
+
+
+# -------------------- cloth-physics-proxy (PART 2/6) --------------------
+
+_CORNERS = [[0.0, 0.0], [10.0, 0.0], [10.0, 8.0], [0.0, 8.0]]  # TL, TR, BR, BL
+
+
+def _grid():
+    from terafold.sim.cloth import ClothGrid
+
+    return ClothGrid(_CORNERS, "right_to_left", [5.0, 0.0], [5.0, 8.0], grasp_xy=[10.0, 4.0])
+
+
+def test_cloth_grid_initializes_flat():
+    cg = _grid()
+    assert np.allclose(cg.pos[:, :, 2], 0.0)
+    assert np.allclose(cg.pos, cg.flat)
+
+
+def test_cloth_right_to_left_moves_right_half_over_left():
+    cg = _grid()
+    before = float(cg.pos[cg.moving][:, 0].mean())
+    cg.update(1.0)
+    after = float(cg.pos[cg.moving][:, 0].mean())
+    assert before > 5.0 and after < 5.0  # right half ends up left of the crease
+
+
+def test_cloth_grasped_vertices_follow_gripper():
+    cg = _grid()
+    handle = np.array([5.0, 4.0, 3.0])
+    cg.update(0.5, handle=handle, grasped=True)
+    assert np.allclose(cg.grasp_point(), handle, atol=1e-6)
+
+
+def test_cloth_vertices_never_below_table():
+    cg = _grid()
+    for f in np.linspace(0.0, 1.0, 11):
+        cg.update(float(f), handle=np.array([5.0, 4.0, 2.0]), grasped=True)
+        assert cg.pos[:, :, 2].min() >= -1e-9
+
+
+def test_cloth_final_state_on_correct_side():
+    cg = _grid()
+    cg.update(1.0)
+    m = cg.success_metrics(place_target=[0.0, 4.0])
+    assert m["crossed_crease"] is True
+    assert m["settled_on_target_side"] is True
+    assert m["fold_visually_successful"] is True
+
+
+def test_cloth_physics_renders_nonblack_and_evaluates(tmp_path):
+    pytest.importorskip("mujoco")
+    from terafold.sim.fold_sim import run_sim_fold
+
+    path, _ = _plan_json(tmp_path)
+    out = str(tmp_path / "cpp.gif")
+    m = run_sim_fold(path, out=out, level="cloth-physics-proxy", view="demo", fps=6,
+                     max_seconds=1.5, width=320, height=240, on_log=lambda x: None)
+    if m["status"] == "error":
+        pytest.skip("mujoco render unavailable")
+    assert m["status"] == "ok" and m["renderer"] == "mujoco"
+    assert "fold_visually_successful" in m and "final_edge_error_m" in m
+    assert m["motor_commands_sent"] == 0 and m["simulation_only"] is True
+
+    import imageio.v2 as iio
+
+    arr = np.asarray(list(iio.get_reader(out))[len(list(iio.get_reader(out))) // 2])[:, :, :3]
+    assert arr.mean() > 20 and arr.std() > 10
+
+
+def test_cloth_physics_split_view_renders(tmp_path):
+    pytest.importorskip("mujoco")
+    from terafold.sim.fold_sim import run_sim_fold
+
+    path, _ = _plan_json(tmp_path)
+    m = run_sim_fold(path, out=str(tmp_path / "split.gif"), level="cloth-physics-proxy",
+                     view="split", fps=5, max_seconds=1.0, width=320, height=240,
+                     on_log=lambda x: None)
+    if m["status"] == "error":
+        pytest.skip("mujoco render unavailable")
+    assert m["status"] == "ok" and m["frames"] > 0
+
+
+def _high_plan(tmp_path):
+    """A plan whose close/place waypoints float 12 cm above the cloth plane."""
+    import json
+
+    plan = {
+        "trajectory": {
+            "waypoints": [[7.0, 4.0, 0.10], [7.0, 4.0, 0.12], [3.0, 4.0, 0.12]],
+            "gripper": [1.0, 0.0, 0.0], "times": [0.0, 1.0, 2.0],
+            "phases": ["pregrasp", "close", "place"],
+        },
+        "fold_state": {
+            "keypoints": {"top_left": [0.0, 0.0], "top_right": [10.0, 0.0],
+                          "bottom_right": [10.0, 8.0], "bottom_left": [0.0, 8.0]},
+            "metadata": {"direction": "right_to_left"},
+        },
+        "fold_line": {"a": [5.0, 0.0], "b": [5.0, 8.0]},
+        "grasp_place": {"grasp": [10.0, 4.0], "place": [0.0, 4.0]},
+        "metadata": {"direction": "right_to_left"},
+    }
+    p = str(tmp_path / "high.json")
+    with open(p, "w") as f:
+        json.dump(plan, f)
+    return p
+
+
+def test_contact_warning_fires_when_gripper_too_high(tmp_path):
+    pytest.importorskip("mujoco")
+    from terafold.sim.fold_sim import run_sim_fold
+
+    p = _high_plan(tmp_path)
+    m = run_sim_fold(p, out=str(tmp_path / "hi.gif"), level="cloth-physics-proxy", view="demo",
+                     fps=5, max_seconds=1.0, width=240, height=200, on_log=lambda x: None)
+    if m["status"] == "error":
+        pytest.skip("mujoco render unavailable")
+    warns = m.get("warnings", [])
+    assert any("not contacting cloth" in w for w in warns), warns
+
+
+def test_mujoco_cloth_falls_back_gracefully(tmp_path):
+    pytest.importorskip("mujoco")
+    from terafold.sim.fold_sim import run_sim_fold
+
+    path, _ = _plan_json(tmp_path)
+    msgs = []
+    m = run_sim_fold(path, out=str(tmp_path / "mc.gif"), level="mujoco-cloth", view="demo",
+                     fps=5, max_seconds=1.0, width=240, height=200, on_log=msgs.append)
+    if m["status"] == "error":
+        pytest.skip("mujoco render unavailable")
+    assert m["mujoco_cloth"]["attempted"] is True
+    assert m["mujoco_cloth"]["used"] is False
+    assert m["mujoco_cloth"]["fell_back_to"] == "cloth-physics-proxy"
+    assert m["render_level"] == "cloth-physics-proxy"
+    assert any("cloth-physics-proxy recommended" in str(x) for x in msgs)
+
+
+def test_cloth_physics_requires_mujoco_message(tmp_path, monkeypatch):
+    import terafold.sim.fold_sim as sim
+
+    monkeypatch.setattr(sim, "have_mujoco", lambda: False)
+    path, _ = _plan_json(tmp_path)
+    m = sim.run_sim_fold(path, out=str(tmp_path / "x.gif"), level="cloth-physics-proxy",
+                         on_log=lambda x: None)
+    assert m["status"] == "missing_dependency"

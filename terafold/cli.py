@@ -1002,8 +1002,12 @@ def benchmark_cmd(
 def sim_fold_cmd(
     plan_json: str = typer.Option(..., help="A FoldPlan / demo result JSON."),
     out: str = typer.Option("runs/sim/fold_demo.mp4", help="Output video (.mp4 / .gif)."),
-    level: str = typer.Option("ee-only", help="ee-only | arm-ik | cloth-proxy | so101-real."),
-    view: str = typer.Option("iso", help="Camera (MuJoCo): top | iso | side | follow-ee | gripper."),
+    level: str = typer.Option(
+        "ee-only",
+        help="ee-only | arm-ik | cloth-proxy | so101-real | cloth-physics-proxy | mujoco-cloth."),
+    view: str = typer.Option(
+        "iso",
+        help="Camera: iso|top|side|follow-ee|gripper|demo|contact|cloth|split."),
     all_views: bool = typer.Option(False, "--all-views", help="Render iso/top/side/gripper (MuJoCo)."),
     save_frames: bool = typer.Option(False, "--save-frames", help="Also export PNG frames."),
     slowmo: bool = typer.Option(False, "--slowmo", help="Slower playback for review."),
@@ -1041,11 +1045,21 @@ def sim_fold_cmd(
             _echo(res["hint"])
         raise typer.Exit(1)
     _ok(f"sim-fold complete ({res['renderer']}, {res['frames']} frames, ~{res['duration_s']}s).")
+    if res.get("mujoco_cloth"):
+        mc = res["mujoco_cloth"]
+        _echo(f"  MuJoCo cloth  : attempted={mc['attempted']} flex_available={mc['flex_available']} "
+              f"-> using {mc['fell_back_to']}")
     if res.get("so101_assets"):
         a = res["so101_assets"]
         which = (f"official {a['type']} @ {a['path']}" if a["found"]
                  else "approximation (no official assets found)")
         _echo(f"  SO-101 assets : {which}")
+    if "fold_visually_successful" in res:
+        tag = "SUCCESS" if res["fold_visually_successful"] else "INCOMPLETE"
+        _echo(f"  fold result   : {tag}  (edge error {res.get('final_edge_error_m')} m, "
+              f"crossed_crease={res.get('crossed_crease')})")
+    for w in (res.get("warnings") or []):
+        _echo(f"  {w}")
     if res.get("all_views"):
         for v, p in res["views"].items():
             _echo(f"  {v:10s}: {p}")

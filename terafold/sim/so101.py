@@ -126,8 +126,17 @@ def _inertial(mass: float, inertia: float = 1e-4) -> str:
             f'diaginertia="{inertia:.6f} {inertia:.6f} {inertia:.6f}"/>')
 
 
-def build_so101_arm(base_xy, base_z: float = 0.0) -> Dict[str, Any]:
+def nominal_reach() -> float:
+    """Approximate maximum reach of the SO-101 (sum of link + gripper lengths)."""
+    s = SO101_SPEC
+    return s["l_upper"] + s["l_fore"] + s["l_wrist"] + s["gripper_len"]
+
+
+def build_so101_arm(base_xy, base_z: float = 0.0, reach_scale: float = 1.0) -> Dict[str, Any]:
     """Build the SO-101 approximation MJCF.
+
+    ``reach_scale`` proportionally scales the link lengths so the arm can reach a
+    larger workspace while keeping its SO-101 proportions.
 
     Returns ``{body_xml, actuator_xml, weld_xml, materials_xml, home_qpos_deg,
     gripper_actuators, gripper_close, weld_body, bodies}``. ``home_qpos_deg`` maps
@@ -137,7 +146,8 @@ def build_so101_arm(base_xy, base_z: float = 0.0) -> Dict[str, Any]:
     s = SO101_SPEC
     bx, by = float(base_xy[0]), float(base_xy[1])
     lim = s["joint_limits_deg"]
-    lup, lfore, lwrist = s["l_upper"], s["l_fore"], s["l_wrist"]
+    rs = max(float(reach_scale), 1.0)
+    lup, lfore, lwrist = s["l_upper"] * rs, s["l_fore"] * rs, s["l_wrist"] * rs
     gmax = s["finger_travel"]
 
     def rng(j):
@@ -192,8 +202,10 @@ def build_so101_arm(base_xy, base_z: float = 0.0) -> Dict[str, Any]:
         f'<position name="a_grip_r" joint="grip_right" kp="30" ctrlrange="0 {gmax}"/>'
         '</actuator>'
     )
+    # relpose "0 0 0 1 0 0 0" makes gripper_base COINCIDE with the EE mocap (the
+    # weld otherwise keeps the bodies at their initial offset and never reaches).
     weld_xml = ('<equality><weld body1="gripper_base" body2="ee" '
-                'torquescale="0" solref="0.01 1"/></equality>')
+                'relpose="0 0 0 1 0 0 0" torquescale="0" solref="0.005 1"/></equality>')
 
     return {
         "body_xml": body_xml,
