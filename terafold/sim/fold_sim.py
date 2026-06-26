@@ -353,38 +353,112 @@ def _write_video(frames: List[np.ndarray], out: str, fps: int) -> Dict[str, Any]
 # --------------------------------------------------------------------------
 
 
-def _render_mujoco(level, waypoints, gripper, times, phases, scene, w, h, fps, max_seconds, log) -> List[np.ndarray]:
+def _render_mujoco(level, waypoints, gripper, times, phases, scene, w, h, fps, max_seconds, log,
+                   debug_xml_path: Optional[str] = None) -> List[np.ndarray]:
     import mujoco  # noqa: F401
 
     ee, grip, ph, duration, n_frames = _timeline(waypoints, gripper, times, phases, fps, max_seconds)
     fold = _fold_fraction(ee[:, :2], grip, scene["grasp"], scene["place"]) if level == "cloth-proxy" \
         else np.zeros(n_frames)
     xml = _build_mjcf(level, scene, ee, w, h)
-    model = mujoco.MjModel.from_xml_string(xml)
-    data = mujoco.MjData(model)
-    renderer = mujoco.Renderer(model, height=h, width=w)
-    mocap_id = model.body("ee").mocapid[0]
-    hinge_qadr = None
-    if level == "cloth-proxy":
-        try:
-            hinge_qadr = model.joint("fold_hinge").qposadr[0]
-        except Exception:
-            hinge_qadr = None
+    try:
+        model = mujoco.MjModel.from_xml_string(xml)
+        data = mujoco.MjData(model)
+        renderer = mujoco.Renderer(model, height=h, width=w)
+        mocap_id = model.body("ee").mocapid[0]
+        hinge_qadr = None
+        if level == "cloth-proxy":
+            try:
+                hinge_qadr = model.joint("fold_hinge").qposadr[0]
+            except Exception:
+                hinge_qadr = None
 
-    frames: List[np.ndarray] = []
-    for i in range(n_frames):
-        data.mocap_pos[mocap_id] = ee[i]
-        if hinge_qadr is not None:
-            data.qpos[hinge_qadr] = float(fold[i]) * np.pi
-        if level == "arm-ik":
-            for _ in range(20):  # let the weld constraint pull the arm to the EE
-                mujoco.mj_step(model, data)
-        else:
-            mujoco.mj_forward(model, data)
-        renderer.update_scene(data, camera="topcam")
-        frames.append(renderer.render().copy())
+        frames: List[np.ndarray] = []
+        for i in range(n_frames):
+            data.mocap_pos[mocap_id] = ee[i]
+            if hinge_qadr is not None:
+                data.qpos[hinge_qadr] = float(fold[i]) * np.pi
+            if level == "arm-ik":
+                for _ in range(40):  # let the weld constraint pull the arm to the EE
+                    mujoco.mj_step(model, data)
+            else:
+                mujoco.mj_forward(model, data)
+            renderer.update_scene(data, camera="topcam")
+            frames.append(renderer.render().copy())
+        renderer.close()
+    except Exception as exc:
+        # Req 6: on any MuJoCo failure, dump the exact MJCF and surface a snippet.
+        path = debug_xml_path
+        if path:
+            try:
+                os.makedirs(os.path.dirname(os.path.abspath(path)) or ".", exist_ok=True)
+                with open(path, "w") as f:
+                    f.write(xml)
+            except Exception:
+                pass
+        snippet = "\n".join(xml.strip().splitlines()[:12])
+        raise RuntimeError(
+            f"{type(exc).__name__}: {exc}"
+            + (f"\nMJCF written to: {path}" if path else "")
+            + f"\n--- MJCF (head) ---\n{snippet}"
+        ) from exc
     log(f"   MuJoCo renderer: {n_frames} frames @ {fps}fps (level={level})")
     return frames
+
+
+def make_link_inertial(mass: float = 0.05, inertia: float = 1e-4) -> str:
+    """Inertial tag giving a moving body positive mass + diagonal inertia.
+
+    Every body that has a joint (a *moving* body) must have positive mass and
+    inertia, or MuJoCo errors with "mass and inertia of moving bodies must be
+    larger than mjMINVAL". Applying this to every arm/gripper/finger body — even
+    ones that would otherwise be massless — guarantees a valid model.
+    """
+    mass = max(float(mass), 1e-4)
+    inertia = max(float(inertia), 1e-6)
+    return (
+        f'<inertial pos="0 0 0" mass="{mass:.5f}" '
+        f'diaginertia="{inertia:.6f} {inertia:.6f} {inertia:.6f}"/>'
+    )
+
+
+# 6-DOF hinge axes for the approximate SO-101 arm.
+_ARM_AXES = ("0 0 1", "0 1 0", "0 1 0", "0 1 0", "1 0 0", "0 0 1")
+
+
+def _arm_chain(span: float, bx: float, by: float) -> str:
+    """Approximate SO-101 6-DOF arm: arm0..arm5 + gripper + finger.
+
+    Every body carries an explicit inertial (via :func:`make_link_inertial`) AND
+    a positive-size geom, so no moving body has zero mass/inertia.
+    """
+    link = max(0.06, 0.16 * span)
+    # Innermost first: gripper + finger (both massive).
+    body = (
+        f'<body name="gripper" pos="{link:.4f} 0 0">'
+        f'{make_link_inertial(0.03, 5e-5)}'
+        f'<geom type="box" size="0.020 0.014 0.008" rgba="0.20 0.20 0.25 1"/>'
+        f'<site name="tip" pos="0 0 0" size="0.005"/>'
+        f'<body name="finger" pos="0.020 0 0">'
+        f'{make_link_inertial(0.01, 1e-5)}'
+        f'<geom type="box" size="0.006 0.002 0.012" rgba="0.15 0.15 0.18 1"/>'
+        f'</body>'
+        f'</body>'
+    )
+    # Wrap arm5 .. arm0 around it (arm0 is anchored to the world at the base).
+    for idx in reversed(range(6)):
+        pos = f"{bx:.4f} {by:.4f} 0.02" if idx == 0 else f"{link:.4f} 0 0"
+        radius = max(0.008, 0.013 - 0.0008 * idx)
+        body = (
+            f'<body name="arm{idx}" pos="{pos}">'
+            f'<joint name="j{idx}" type="hinge" axis="{_ARM_AXES[idx]}"/>'
+            f'{make_link_inertial()}'
+            f'<geom type="capsule" fromto="0 0 0 {link:.4f} 0 0" size="{radius:.4f}" '
+            f'rgba="0.55 0.55 0.60 1"/>'
+            f'{body}'
+            f'</body>'
+        )
+    return body
 
 
 def _build_mjcf(level, scene, ee, w, h) -> str:
@@ -398,30 +472,12 @@ def _build_mjcf(level, scene, ee, w, h) -> str:
     cam_z = 0.6 + span
     arm_xml = ""
     weld_xml = ""
+    defaults_xml = ""
     if level == "arm-ik":
-        bx = cx - 0.5 * span
-        arm_xml = f"""
-    <body name="arm0" pos="{bx} {cy} 0">
-      <geom type="cylinder" size="0.02 0.04" rgba="0.3 0.3 0.35 1"/>
-      <body name="arm1" pos="0 0 0.04"><joint type="hinge" axis="0 0 1"/>
-        <geom type="capsule" fromto="0 0 0 0 0 0.12" size="0.012" rgba="0.55 0.55 0.6 1"/>
-        <body name="arm2" pos="0 0 0.12"><joint type="hinge" axis="0 1 0"/>
-          <geom type="capsule" fromto="0 0 0 {0.4*span} 0 0" size="0.011" rgba="0.55 0.55 0.6 1"/>
-          <body name="arm3" pos="{0.4*span} 0 0"><joint type="hinge" axis="0 1 0"/>
-            <geom type="capsule" fromto="0 0 0 {0.4*span} 0 0" size="0.010" rgba="0.55 0.55 0.6 1"/>
-            <body name="arm4" pos="{0.4*span} 0 0"><joint type="hinge" axis="1 0 0"/>
-              <joint type="hinge" axis="0 1 0"/>
-              <body name="arm_tip" pos="0.03 0 0">
-                <joint type="hinge" axis="0 0 1"/>
-                <geom type="sphere" size="0.012" rgba="0.2 0.2 0.25 1"/>
-                <site name="tip" pos="0 0 0" size="0.005"/>
-              </body>
-            </body>
-          </body>
-        </body>
-      </body>
-    </body>"""
-        weld_xml = '<equality><weld body1="arm_tip" body2="ee"/></equality>'
+        arm_xml = _arm_chain(span, cx - 0.5 * span, cy)
+        # Weld the gripper to the EE mocap so the arm follows the planned path.
+        weld_xml = '<equality><weld body1="gripper" body2="ee" solref="0.02 1"/></equality>'
+        defaults_xml = '<default><joint damping="3" armature="0.05" limited="false"/></default>'
 
     cloth_moving = ""
     if level == "cloth-proxy":
@@ -439,8 +495,9 @@ def _build_mjcf(level, scene, ee, w, h) -> str:
 
     return f"""
 <mujoco model="terafold_fold_sim">
-  <option gravity="0 0 0" integrator="implicitfast"/>
+  <option timestep="0.002" gravity="0 0 0" integrator="implicitfast"/>
   <visual><global offwidth="{w}" offheight="{h}"/></visual>
+  {defaults_xml}
   <worldbody>
     <light pos="{cx} {cy} {cam_z}" dir="0 0 -1" diffuse="0.9 0.9 0.9"/>
     <camera name="topcam" pos="{cx} {cy - 0.25 * span} {cam_z}" xyaxes="1 0 0 0 0.7 0.72"/>
@@ -517,9 +574,10 @@ def run_sim_fold(
                 return _missing_mujoco(plan_json, out, level, len(waypoints))
             log(f"[warn] MuJoCo not installed; using the 2D renderer. {SIM_INSTALL_HINT}")
         else:
+            debug_xml = os.path.splitext(out)[0] + ".mjcf.xml"
             try:
                 frames = _render_mujoco(level, waypoints, gripper, times, phases, scene,
-                                        width, height, fps, max_seconds, log)
+                                        width, height, fps, max_seconds, log, debug_xml_path=debug_xml)
                 renderer = "mujoco"
             except Exception as exc:
                 render_error = str(exc)
@@ -527,7 +585,8 @@ def run_sim_fold(
                     return {
                         "status": "error", "level": level, "out": out,
                         "error": f"MuJoCo render failed: {exc}",
-                        "hint": "Try --level ee-only (2D, always works).",
+                        "xml_debug": debug_xml if os.path.exists(debug_xml) else None,
+                        "hint": "Inspect the MJCF above, or use --level ee-only (2D, always works).",
                         "num_waypoints": int(len(waypoints)),
                         "control": "none (simulation only)", "motor_commands_sent": 0,
                         "simulation_only": True,
