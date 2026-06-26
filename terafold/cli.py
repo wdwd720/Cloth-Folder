@@ -391,6 +391,63 @@ def dry_run_fold(
 # --------------------------------------------------------------------------
 
 
+@app.command("demo-today")
+def demo_today_cmd(
+    camera_index: int = typer.Option(0, help="Webcam index (real camera)."),
+    camera: str = typer.Option("opencv", help="opencv | mock (mock renders a marked towel)."),
+    mode: str = typer.Option("markers", help="markers | keypoints | auto."),
+    task: str = typer.Option("configs/task_fold_towel_half.yaml"),
+    robot: str = typer.Option("mock", help="mock | so101 | learm."),
+    checkpoint: Optional[str] = typer.Option(None, help="Keypoint model checkpoint (mode=keypoints)."),
+    calibration: Optional[str] = typer.Option(None, help="Homography JSON for metric planning."),
+    out: Optional[str] = typer.Option(None, help="Episodes root (default data/episodes/<task>_demo)."),
+    overlay_out: Optional[str] = typer.Option(None, help="Overlay image path."),
+    dry_run: bool = typer.Option(False, "--dry-run/--no-dry-run", help="Force dry-run (no motion)."),
+    enable_motion: bool = typer.Option(False, "--enable-motion", help="Allow physical motion."),
+    i_understand: bool = typer.Option(
+        False, "--i-understand-this-moves-hardware", help="Required second motion flag."
+    ),
+):
+    """One-shot real-world towel half-fold demo: camera -> perceive -> plan -> dry-run/execute.
+
+    Safe by default (dry-run). Real motion needs:
+    --robot so101 --enable-motion --i-understand-this-moves-hardware
+    """
+    from terafold.demo import run_demo_today
+
+    try:
+        res = run_demo_today(
+            task_path=task, camera=camera, camera_index=camera_index, mode=mode, robot=robot,
+            checkpoint=checkpoint, calibration=calibration, out=out, overlay_out=overlay_out,
+            dry_run=dry_run, enable_motion=enable_motion, acknowledge=i_understand,
+            on_log=_echo,
+        )
+    except Exception as exc:
+        from terafold.robot.safety import SafetyError
+
+        if isinstance(exc, SafetyError):
+            _err(f"Safety: {exc}")
+            raise typer.Exit(2)
+        _err(f"demo-today failed: {exc}")
+        raise typer.Exit(1)
+
+    status = res.get("status")
+    if status == "ok":
+        _ok(f"demo-today complete ({'REAL' if res.get('real_motion') else 'dry-run'}).")
+    elif status == "real_robot_unavailable":
+        _err(f"Real {robot} bring-up unavailable: {res.get('robot_error')}")
+        _echo("Dry-run plan + overlay + episode were still saved.")
+    elif status == "aborted":
+        _err(f"Aborted: {res.get('stop_reason')}")
+    else:
+        _err(f"Status: {status}: {res.get('error')}")
+        raise typer.Exit(1)
+    if res.get("episode_dir"):
+        _echo(f"  episode : {res['episode_dir']}")
+    if res.get("overlay_path"):
+        _echo(f"  overlay : {res['overlay_path']}")
+
+
 @app.command("record-demo")
 def record_demo_cmd(
     task: str = typer.Option("configs/task_fold_towel_half.yaml"),

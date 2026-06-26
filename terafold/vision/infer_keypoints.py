@@ -42,14 +42,17 @@ __all__ = [
     "infer_keypoints",
     "KeypointPredictor",
     "FallbackKeypointPredictor",
+    "MarkerKeypointPredictor",
     "get_keypoint_predictor",
     "resolve_keypoint_predictor",
     "LEARNED_KIND",
     "FALLBACK_KIND",
+    "MARKER_KIND",
 ]
 
 LEARNED_KIND = "learned_keypoint_model"
 FALLBACK_KIND = "classical_fallback"
+MARKER_KIND = "marker_detector"
 
 
 # --------------------------------------------------------------------------
@@ -223,6 +226,45 @@ class FallbackKeypointPredictor:
             mask = segment_cloth(img)
             kp = corners_from_mask(mask)
         return _fold_state_from_keypoints(kp, img, direction=direction)
+
+
+class MarkerKeypointPredictor:
+    """Marker-based perception: recover corners from colored fiducials.
+
+    Designed for the ``demo-today`` workflow with a physical towel tagged with
+    red/green/blue/yellow corner markers (matching
+    :data:`terafold.vision.marker_detector.DEFAULT_MARKER_COLORS`). If the four
+    markers are not all visible, it falls back to the classical mask-based
+    predictor so the demo never dead-ends — the chosen path is recorded in the
+    returned :class:`FoldState`'s ``metadata['perception']``.
+    """
+
+    name = "marker_detector"
+
+    def __init__(self, colors=None, fallback: bool = True) -> None:
+        self.colors = colors
+        self._fallback = FallbackKeypointPredictor() if fallback else None
+
+    def predict(self, image: np.ndarray, direction: str = "right_to_left") -> FoldState:
+        img = np.asarray(image)
+        kp = None
+        try:
+            kp = keypoints_from_markers(img, self.colors)
+        except Exception:
+            kp = None
+        if kp is None:
+            if self._fallback is None:
+                raise ValueError(
+                    "MarkerKeypointPredictor: fewer than 4 corner markers detected "
+                    "and no fallback enabled. Ensure red/green/blue/yellow markers "
+                    "are visible, or use --mode keypoints."
+                )
+            fs = self._fallback.predict(img, direction=direction)
+            fs.metadata = {**(fs.metadata or {}), "perception": "marker_fallback_classical"}
+            return fs
+        fs = _fold_state_from_keypoints(kp, img, direction=direction)
+        fs.metadata = {**(fs.metadata or {}), "perception": "markers"}
+        return fs
 
 
 # --------------------------------------------------------------------------

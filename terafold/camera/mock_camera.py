@@ -44,10 +44,12 @@ class MockCamera(BaseCamera):
         config: Optional[CameraConfig] = None,
         seed: int = 0,
         image_size: int = 480,
+        marker_mode: bool = False,
     ) -> None:
         super().__init__()
         self.config = config or CameraConfig(type="mock")
         self.image_size = int(image_size)
+        self.marker_mode = bool(marker_mode)
         self._rng = np.random.default_rng(seed)
         self._t0 = time.monotonic()
         self.last_ground_truth: Optional[FoldState] = None
@@ -76,11 +78,10 @@ class MockCamera(BaseCamera):
             render_towel_scene,
         )
 
-        marker_mode = False
-        if self.config is not None and not self.config.mock_render_cloth:
-            # Still render a scene (mask gives a usable cloth), but without
-            # painted markers. mock_render_cloth toggles marker painting off.
-            marker_mode = False
+        # Paint colored corner markers when requested (lets the marker-based
+        # demo run end-to-end with no webcam — the synthetic towel is tagged
+        # with the same colors the marker detector looks for).
+        marker_mode = bool(self.marker_mode)
 
         cfg = SyntheticClothConfig(image_size=self.image_size, marker_mode=marker_mode)
         sample = render_towel_scene(self._rng, cfg, marker_mode=marker_mode)

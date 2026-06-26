@@ -154,6 +154,33 @@ terafold plan-fold --image data/calib/table.jpg --task configs/task_fold_towel_h
 terafold dry-run-fold --task configs/task_fold_towel_half.yaml --robot mock --camera mock
 ```
 
+### One-command demo (`demo-today`)
+
+The fastest path to a real-world towel half-fold with one SO-101 arm, a top-down
+webcam, and a towel with 4 colored corner markers (red/green/blue/yellow). It
+opens the camera, detects the markers, computes + overlays the fold plan, runs a
+safe dry-run, and records the episode:
+
+```bash
+# Safe dry-run (default). Falls back to a marker-rendering mock camera if no webcam:
+terafold demo-today --camera-index 0 --mode markers --task configs/task_fold_towel_half.yaml --dry-run
+
+# Dry-run against the SO-101 adapter (no lerobot needed):
+terafold demo-today --camera-index 0 --mode markers --robot so101 --dry-run
+
+# Real, slow execution — requires ALL of these (only when you're ready):
+terafold demo-today --camera-index 0 --mode markers --robot so101 \
+    --enable-motion --i-understand-this-moves-hardware
+```
+
+Safety is layered: slow speed + workspace bounds (from the task config), a
+`STOP_TERAFOLD` stop-file and Ctrl+C emergency stop (watchdog), the trajectory is
+validated against the workspace before any motion, and the run is saved as an
+episode (frames, observations, actions, plan, safety, result) with an overlay
+image. `--mode markers` uses the colored fiducials (falling back to the classical
+detector if markers aren't all visible); `--mode keypoints` uses the learned
+model (`--checkpoint`).
+
 ## 14. Record real demos
 
 ```bash
