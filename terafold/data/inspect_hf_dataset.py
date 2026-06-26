@@ -15,6 +15,8 @@ from __future__ import annotations
 
 from typing import Any, Dict, List, Optional
 
+from terafold.data.sources import get_data_source
+
 __all__ = ["inspect_hf_dataset"]
 
 
@@ -29,6 +31,7 @@ def _empty_report(repo_id: str) -> Dict[str, Any]:
         "repo_id": repo_id,
         "available": False,
         "online": None,
+        "in_registry": False,
         "modalities": [],
         "num_episodes": None,
         "num_frames": None,
@@ -37,14 +40,37 @@ def _empty_report(repo_id: str) -> Dict[str, Any]:
         "state_dim": None,
         "action_dim": None,
         "embodiment": "unknown",
+        "est_size": "unknown",
+        "policy_compatible": "uncertain",
         "action_space_matches_our_robot": "uncertain",
         "recommended_use": "",
+        "streaming_checked": False,
+        "streaming_available": None,
         "error": None,
         "guidance": "",
     }
 
 
-def inspect_hf_dataset(repo_id: str, our_robot: Optional[object] = None) -> Dict[str, Any]:
+def _seed_from_registry(report: Dict[str, Any], repo_id: str) -> None:
+    """Seed the report from the curated registry (works fully offline)."""
+    source = get_data_source(repo_id)
+    if source is None:
+        return
+    report["in_registry"] = True
+    report["registry"] = source.to_dict()
+    report["embodiment"] = source.embodiment
+    report["modalities"] = list(source.modality)
+    report["est_size"] = source.est_size
+    report["policy_compatible"] = source.policy_compatible
+    report["recommended_use"] = ", ".join(source.recommended_use)
+    report["large"] = source.large
+    report["streamable"] = source.streamable
+    report["notes"] = source.notes
+
+
+def inspect_hf_dataset(
+    repo_id: str, our_robot: Optional[object] = None, streaming: bool = False
+) -> Dict[str, Any]:
     """Inspect ``repo_id`` and return a structured report dict.
 
     Parameters
@@ -54,21 +80,73 @@ def inspect_hf_dataset(repo_id: str, our_robot: Optional[object] = None) -> Dict
     our_robot:
         Optional :class:`~terafold.config.schema.RobotConfig`. When given, its
         ``dof`` is used to judge whether the dataset's action space could match.
+    streaming:
+        When ``True``, additionally peek at ONE streamed example to confirm the
+        real modalities / state / action dims without downloading the dataset.
     """
     report = _empty_report(repo_id)
+
+    # 0. Seed curated knowledge so the report is useful even offline.
+    _seed_from_registry(report, repo_id)
 
     # 1. Try to read the LeRobot/HF info.json via the hub API (lazy import).
     info = _try_fetch_info(repo_id, report)
     if info is not None:
         _fill_from_lerobot_info(report, info)
 
-    # 2. Embodiment + action-space judgement.
+    # 2. Optional streaming peek (bounded: exactly one example).
+    if streaming:
+        report["streaming_checked"] = True
+        _streaming_peek(repo_id, report)
+
+    # 3. Embodiment + action-space judgement.
     _judge_action_space(report, our_robot)
 
-    # 3. Recommendation string.
-    report["recommended_use"] = _recommend(report, our_robot)
+    # 4. Recommendation: keep the curated recommendation if present, and always
+    #    attach the live action-space advice separately.
+    report["action_advice"] = _recommend(report, our_robot)
+    if not report.get("recommended_use"):
+        report["recommended_use"] = report["action_advice"]
 
     return report
+
+
+def _streaming_peek(repo_id: str, report: Dict[str, Any]) -> None:
+    """Pull a single streamed example to confirm modalities/dims (no download)."""
+    try:
+        import datasets  # type: ignore
+    except Exception as exc:
+        report["streaming_available"] = False
+        report["streaming_note"] = f"datasets not installed: {exc}. {_INSTALL_HINT}"
+        if report.get("error") is None:
+            report["error"] = f"datasets unavailable: {exc}"
+            report["guidance"] = _INSTALL_HINT
+        return
+    try:
+        stream = datasets.load_dataset(repo_id, split="train", streaming=True)
+        example = next(iter(stream))
+    except Exception as exc:
+        report["streaming_available"] = False
+        report["streaming_note"] = (
+            f"streaming peek failed ({exc})." + (" (offline?)" if _looks_offline(exc) else "")
+        )
+        return
+
+    report["streaming_available"] = True
+    report["available"] = True
+    keys = list(example.keys())
+    report["streaming_example_keys"] = keys
+    if not report.get("modalities"):
+        report["modalities"] = keys
+    img_keys = [k for k in keys if "image" in k.lower() or ".images." in k.lower()]
+    if img_keys:
+        report["image_keys"] = img_keys
+    state = example.get("observation.state")
+    action = example.get("action")
+    if hasattr(state, "__len__") and report.get("state_dim") is None:
+        report["state_dim"] = len(state)
+    if hasattr(action, "__len__") and report.get("action_dim") is None:
+        report["action_dim"] = len(action)
 
 
 def _try_fetch_info(repo_id: str, report: Dict[str, Any]) -> Optional[dict]:

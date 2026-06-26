@@ -510,14 +510,131 @@ def export_lerobot_cmd(
     _echo(print_lerobot_training_commands(out))
 
 
+@app.command("data-sources")
+def data_sources_cmd():
+    """List known public cloth/folding data sources and how to use them."""
+    from terafold.data.sources import format_data_sources
+
+    _echo(format_data_sources())
+
+
+def _print_inspect_report(report: dict) -> None:
+    order = [
+        "repo_id", "in_registry", "available", "online", "embodiment", "est_size",
+        "modalities", "image_keys", "video_keys", "num_episodes", "num_frames",
+        "state_dim", "action_dim", "policy_compatible", "action_space_matches_our_robot",
+        "recommended_use", "action_advice", "streaming_checked", "streaming_available",
+        "streaming_note", "notes", "error", "guidance",
+    ]
+    for k in order:
+        v = report.get(k)
+        if v not in (None, "", []):
+            _echo(f"  {k}: {v}")
+
+
 @app.command("inspect-hf-dataset")
-def inspect_hf_dataset_cmd(repo_id: str = typer.Option(..., help="HuggingFace dataset repo id.")):
+def inspect_hf_dataset_cmd(
+    repo_id: str = typer.Option(..., help="HuggingFace dataset repo id."),
+    streaming: bool = typer.Option(
+        False, "--streaming", help="Peek one streamed example (no download)."
+    ),
+):
     """Inspect a HuggingFace/LeRobot dataset and judge fit for our robot."""
     from terafold.data.inspect_hf_dataset import inspect_hf_dataset
 
-    report = inspect_hf_dataset(repo_id)
-    for k, v in report.items():
-        _echo(f"  {k}: {v}")
+    report = inspect_hf_dataset(repo_id, streaming=streaming)
+    _print_inspect_report(report)
+
+
+def _print_hf_result(res: dict) -> None:
+    """Print a streaming/sample/cache/import result; exit non-zero on failure."""
+    status = res.get("status")
+    if status == "ok":
+        _ok(
+            f"{res.get('repo_id')}: {res.get('saved', res.get('episodes', 0))} "
+            f"{'samples' if 'saved' in res else 'episodes'} -> {res.get('out')}"
+        )
+        if res.get("rows") is not None:
+            _echo(f"  rows: {res['rows']}")
+        if res.get("note"):
+            _echo(f"  note: {res['note']}")
+        return
+    if status == "missing_dependency":
+        _err(res["message"])
+        _err(f"Run:  {res['install_command']}")
+        raise typer.Exit(1)
+    if status == "requires_allow_large_download":
+        _err(res.get("message", "This would require a large download."))
+        _err("Re-run with --allow-large-download to permit it (or set a smaller --max-*).")
+        raise typer.Exit(2)
+    if status == "offline":
+        _err(f"Offline / unreachable: {res.get('error')}")
+        if res.get("hint"):
+            _err(res["hint"])
+        raise typer.Exit(1)
+    _err(f"Failed: {res}")
+    raise typer.Exit(1)
+
+
+@app.command("sample-hf-dataset")
+def sample_hf_dataset_cmd(
+    repo_id: str = typer.Option(..., help="HuggingFace dataset repo id."),
+    max_samples: int = typer.Option(500, help="Max examples to stream (bounded)."),
+    out: Optional[str] = typer.Option(None, help="Output dir (default data/public_samples/<name>)."),
+    split: str = typer.Option("train"),
+    convert: bool = typer.Option(
+        True, "--convert/--no-convert", help="Convert images to TeraFold perception format."
+    ),
+    allow_large_download: bool = typer.Option(False, "--allow-large-download"),
+):
+    """Stream a bounded image sample from a public dataset (NO full download)."""
+    from terafold.data.hf_streaming import sample_hf_dataset
+
+    res = sample_hf_dataset(
+        repo_id, max_samples=max_samples, out=out, split=split,
+        convert=convert, allow_large_download=allow_large_download,
+    )
+    _print_hf_result(res)
+
+
+@app.command("cache-hf-subset")
+def cache_hf_subset_cmd(
+    repo_id: str = typer.Option(...),
+    max_episodes: int = typer.Option(20, help="Max episodes to cache (bounded)."),
+    out: Optional[str] = typer.Option(None, help="Output dir (default data/cache/<name>)."),
+    split: str = typer.Option("train"),
+    allow_large_download: bool = typer.Option(False, "--allow-large-download"),
+):
+    """Cache a bounded subset of episodes locally by streaming (NO full download)."""
+    from terafold.data.hf_streaming import cache_hf_subset
+
+    res = cache_hf_subset(
+        repo_id, max_episodes=max_episodes, out=out, split=split,
+        allow_large_download=allow_large_download,
+    )
+    _print_hf_result(res)
+
+
+@app.command("import-hf-lerobot")
+def import_hf_lerobot_cmd(
+    repo_id: str = typer.Option(...),
+    max_episodes: int = typer.Option(20, help="Max episodes to import (bounded)."),
+    out: Optional[str] = typer.Option(None, help="Output dir (default data/public/<name>)."),
+    split: str = typer.Option("train"),
+    allow_large_download: bool = typer.Option(False, "--allow-large-download"),
+):
+    """Import a bounded subset of a LeRobot dataset into TeraFold's format.
+
+    Foreign actions are imported for analysis/representation ONLY — never for
+    direct rollout on the LeArm.
+    """
+    from terafold.data.hf_streaming import import_hf_lerobot
+
+    res = import_hf_lerobot(
+        repo_id, max_episodes=max_episodes, out=out, split=split,
+        allow_large_download=allow_large_download,
+    )
+    _print_hf_result(res)
 
 
 # --------------------------------------------------------------------------

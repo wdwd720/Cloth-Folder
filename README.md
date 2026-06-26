@@ -197,6 +197,28 @@ terafold train-smolvla --dataset data/lerobot/terafold_towel_half_v0 --out runs/
 > rarely matches our arm. Use `terafold inspect-hf-dataset --repo-id <id>` to
 > check before assuming compatibility.
 
+### Public dataset sources (streaming-first)
+
+TeraFold ships a curated registry of public cloth/folding datasets and **never
+downloads huge datasets by default** — everything streams or is bounded by an
+explicit cap; a full download requires `--allow-large-download`.
+
+```bash
+terafold data-sources                                              # curated registry + how to use each
+terafold inspect-hf-dataset --repo-id observabot/so101_cloth_folding1 --streaming   # metadata, no download
+terafold sample-hf-dataset  --repo-id REPO --max-samples 500 --out data/public_samples/NAME
+terafold cache-hf-subset    --repo-id REPO --max-episodes 20 --out data/cache/NAME
+terafold import-hf-lerobot  --repo-id REPO --max-episodes 20 --out data/public/NAME
+```
+
+Each registry entry records modality, estimated size, embodiment (SO-101 / Aloha
+/ Unitree H1 / human / image-only / synthetic), **direct policy compatibility
+with our LeArm (yes/no/maybe)**, and recommended use (perception, fold-success
+scoring, visual pretraining, ACT testing, bimanual reference — or *not for direct
+rollout*). Sampled images are auto-converted into TeraFold's perception format.
+If `datasets`/`huggingface_hub` are missing or you're offline, the commands fail
+gracefully with the exact install command.
+
 ## 18. Evaluation metrics
 
 `terafold score-fold --before before.jpg --after after.jpg` and
@@ -234,7 +256,7 @@ terafold/
   physics/               # cloth state, fold geometry, quasi-static heuristics, quality
   planning/              # fold task, geometric planner, trajectory, residual model
   robot/                 # base, mock, LeArm shell, SO-101, bimanual, safety
-  data/                  # episode schema, recorder, replay, LeRobot export, HF inspect
+  data/                  # episode schema, recorder, replay, LeRobot export, HF inspect/stream, source registry
   learning/              # ACT / SmolVLA wrappers, safe rollout
   eval/                  # fold scoring, benchmarking
 configs/                 # task / robot / camera / workspace YAML
