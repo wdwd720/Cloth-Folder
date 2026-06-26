@@ -43,7 +43,13 @@ __all__ = [
     "KeypointPredictor",
     "FallbackKeypointPredictor",
     "get_keypoint_predictor",
+    "resolve_keypoint_predictor",
+    "LEARNED_KIND",
+    "FALLBACK_KIND",
 ]
+
+LEARNED_KIND = "learned_keypoint_model"
+FALLBACK_KIND = "classical_fallback"
 
 
 # --------------------------------------------------------------------------
@@ -176,6 +182,8 @@ def infer_keypoints(model, image: np.ndarray) -> ClothKeypoints:
 class KeypointPredictor:
     """Learned perception: ``predict(image) -> FoldState`` via the U-Net."""
 
+    name = "learned_keypoint_model"
+
     def __init__(self, checkpoint: str, device: Optional[str] = None) -> None:
         self.checkpoint = checkpoint
         self.device = device
@@ -197,6 +205,8 @@ class KeypointPredictor:
 
 class FallbackKeypointPredictor:
     """Numpy-only perception: markers if present, else mask + min-area-rect."""
+
+    name = "classical_fallback"
 
     def predict(
         self, image: np.ndarray, direction: str = "right_to_left"
@@ -220,18 +230,59 @@ class FallbackKeypointPredictor:
 # --------------------------------------------------------------------------
 
 
+def resolve_keypoint_predictor(checkpoint: Optional[str] = None):
+    """Resolve the best predictor AND explain the choice.
+
+    Returns ``(predictor, info)`` where ``info`` is a dict with keys:
+
+    * ``kind`` — :data:`LEARNED_KIND` or :data:`FALLBACK_KIND`
+    * ``checkpoint`` — the checkpoint path considered (or ``None``)
+    * ``reason`` — why this predictor was chosen / why it fell back
+    * ``torch_available`` — whether torch could be imported
+
+    The learned :class:`KeypointPredictor` is used only when a checkpoint path
+    is given, the file exists, torch is importable, and the checkpoint loads.
+    Any failure degrades to the numpy :class:`FallbackKeypointPredictor` with a
+    machine-readable ``reason`` so callers can warn loudly instead of silently.
+    """
+    info = {
+        "kind": FALLBACK_KIND,
+        "checkpoint": checkpoint,
+        "reason": "",
+        "torch_available": False,
+    }
+    try:
+        import torch  # noqa: F401
+
+        info["torch_available"] = True
+    except Exception:
+        info["torch_available"] = False
+
+    if not checkpoint:
+        info["reason"] = "no checkpoint provided"
+        return FallbackKeypointPredictor(), info
+    if not os.path.exists(checkpoint):
+        info["reason"] = f"checkpoint not found: {checkpoint}"
+        return FallbackKeypointPredictor(), info
+    if not info["torch_available"]:
+        info["reason"] = "torch not installed (install with: pip install -e '.[ml]')"
+        return FallbackKeypointPredictor(), info
+    try:
+        predictor = KeypointPredictor(checkpoint)
+    except Exception as exc:  # bad/corrupt checkpoint, arch mismatch, etc.
+        info["reason"] = f"failed to load checkpoint ({type(exc).__name__}: {exc})"
+        return FallbackKeypointPredictor(), info
+
+    info["kind"] = LEARNED_KIND
+    info["reason"] = "ok"
+    return predictor, info
+
+
 def get_keypoint_predictor(checkpoint: Optional[str] = None):
     """Return the best available predictor; always usable.
 
-    Learned :class:`KeypointPredictor` if ``checkpoint`` exists and torch is
-    importable, otherwise the numpy :class:`FallbackKeypointPredictor`.
+    Thin wrapper over :func:`resolve_keypoint_predictor` that discards the
+    diagnostic info. Learned :class:`KeypointPredictor` if ``checkpoint`` exists
+    and torch is importable, otherwise the numpy :class:`FallbackKeypointPredictor`.
     """
-    if checkpoint and os.path.exists(checkpoint):
-        try:
-            import torch  # noqa: F401
-
-            return KeypointPredictor(checkpoint)
-        except Exception:
-            # Missing torch or a bad checkpoint must never break perception.
-            pass
-    return FallbackKeypointPredictor()
+    return resolve_keypoint_predictor(checkpoint)[0]

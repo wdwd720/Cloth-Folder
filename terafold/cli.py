@@ -95,10 +95,11 @@ def infer_keypoints_cmd(
 ):
     """Run keypoint inference on a single image (learned model or classical fallback)."""
     from terafold.vision.imageio import imread
-    from terafold.vision.infer_keypoints import get_keypoint_predictor
+    from terafold.vision.infer_keypoints import resolve_keypoint_predictor
 
     img = imread(image)
-    predictor = get_keypoint_predictor(checkpoint)
+    predictor, pinfo = resolve_keypoint_predictor(checkpoint)
+    _report_perception(pinfo, checkpoint)
     fs = predictor.predict(img)
     _ok("Detected keypoints:")
     _echo(f"  corners: {fs.keypoints.corners.tolist()}")
@@ -234,16 +235,40 @@ def calibrate_homography(
 # --------------------------------------------------------------------------
 
 
-def _load_task(task_path: str):
+def _load_task(task_path: str, keypoint_checkpoint: Optional[str] = None):
     from terafold.config.load import load_task_config
     from terafold.config.validate import validate_task_config
     from terafold.planning.fold_task import FoldTask
 
     cfg = load_task_config(task_path)
+    # A `--checkpoint` from the CLI overrides the task config at runtime, so the
+    # learned keypoint model is actually wired into the planner (and the "no
+    # checkpoint" validation warning does not spuriously fire).
+    if keypoint_checkpoint:
+        cfg.learning.keypoint_checkpoint = keypoint_checkpoint
+        cfg.learning.use_keypoint_model = True
     warnings = validate_task_config(cfg)
     for w in warnings:
         _err(f"[config warning] {w}")
     return FoldTask.from_config(cfg)
+
+
+def _report_perception(info: dict, checkpoint: Optional[str]) -> None:
+    """Print which perception backend is in use; warn loudly on fallback."""
+    from terafold.vision.infer_keypoints import LEARNED_KIND
+
+    if info["kind"] == LEARNED_KIND:
+        _echo(f"perception: {info['kind']}")
+        _echo(f"checkpoint: {info['checkpoint']}")
+    else:
+        _echo(f"perception: {info['kind']}")
+        if checkpoint:
+            _err(
+                f"WARNING: --checkpoint {checkpoint!r} was provided but the planner "
+                f"fell back to the classical predictor ({info['reason']})."
+            )
+        else:
+            _echo("checkpoint: none")
 
 
 def _maybe_frames(calibration: Optional[str]):
@@ -263,13 +288,22 @@ def plan_fold_cmd(
     use_residual: Optional[str] = typer.Option(None, help="Residual model checkpoint."),
     calibration: Optional[str] = typer.Option(None, help="Homography JSON for metric planning."),
     out: Optional[str] = typer.Option(None, help="Save plan.json here."),
-    viz: Optional[str] = typer.Option(None, help="Save plan overlay image here."),
+    overlay_out: Optional[str] = typer.Option(
+        None, help="Save keypoints/fold-plan overlay visualization to this path."
+    ),
+    viz: Optional[str] = typer.Option(None, help="Alias of --overlay-out (deprecated)."),
 ):
-    """Compute a fold plan from a camera image."""
-    from terafold.vision.infer_keypoints import get_keypoint_predictor
-    from terafold.planning.towel_half_fold import TowelHalfFoldPlanner
+    """Compute a fold plan from a camera image.
 
-    ft = _load_task(task)
+    Pass ``--checkpoint`` to use the learned keypoint model (requires torch and a
+    valid checkpoint); otherwise the classical fallback predictor is used. The
+    chosen perception backend is printed as ``perception: ...``.
+    """
+    from terafold.planning.towel_half_fold import TowelHalfFoldPlanner
+    from terafold.vision.infer_keypoints import resolve_keypoint_predictor
+
+    # The checkpoint is wired into the task config so the planner truly uses it.
+    ft = _load_task(task, keypoint_checkpoint=checkpoint)
     frames = _maybe_frames(calibration)
     if image:
         from terafold.vision.imageio import imread
@@ -284,21 +318,25 @@ def plan_fold_cmd(
         img = cam.read().image
         cam.disconnect()
 
+    # Resolve perception explicitly so we can report it and warn on fallback.
+    predictor, pinfo = resolve_keypoint_predictor(checkpoint)
+    _report_perception(pinfo, checkpoint)
+
     residual = use_residual  # path; apply_residual_correction handles loading
     planner = TowelHalfFoldPlanner(
-        ft, frames=frames, keypoint_predictor=get_keypoint_predictor(checkpoint),
-        residual_model=residual,
+        ft, frames=frames, keypoint_predictor=predictor, residual_model=residual,
     )
     plan = planner.plan_from_image(img)
     _echo(plan.summary())
     if out:
         plan.save(out)
         _ok(f"Saved plan -> {out}")
-    if viz:
+    overlay = overlay_out or viz
+    if overlay:
         from terafold.vision.visualization import draw_fold_plan, save_visualization
 
-        save_visualization(viz, draw_fold_plan(img.copy(), plan, frames))
-        _ok(f"Saved overlay -> {viz}")
+        save_visualization(overlay, draw_fold_plan(img.copy(), plan, frames))
+        _ok(f"Saved overlay -> {overlay}")
 
 
 @app.command("dry-run-fold")
@@ -315,17 +353,19 @@ def dry_run_fold(
     from terafold.camera.mock_camera import build_camera
     from terafold.planning.towel_half_fold import TowelHalfFoldPlanner
     from terafold.planning.trajectory import trajectory_to_actions
-    from terafold.vision.infer_keypoints import get_keypoint_predictor
+    from terafold.vision.infer_keypoints import resolve_keypoint_predictor
     from terafold.robot.mock_robot import MockRobot
 
-    ft = _load_task(task)
+    ft = _load_task(task, keypoint_checkpoint=checkpoint)
     frames = _maybe_frames(calibration)
     cam = build_camera(CameraConfig(type=camera))
     cam.connect()
     img = cam.read().image
     cam.disconnect()
 
-    planner = TowelHalfFoldPlanner(ft, frames=frames, keypoint_predictor=get_keypoint_predictor(checkpoint))
+    predictor, pinfo = resolve_keypoint_predictor(checkpoint)
+    _report_perception(pinfo, checkpoint)
+    planner = TowelHalfFoldPlanner(ft, frames=frames, keypoint_predictor=predictor)
     plan = planner.plan_from_image(img)
     _echo(plan.summary())
 
