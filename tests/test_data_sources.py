@@ -103,9 +103,17 @@ def test_unbounded_large_source_blocked_before_download(tmp_path):
     assert not os.path.exists(out)
 
 
-def test_missing_dependency_is_graceful_and_no_download(tmp_path):
-    # datasets/huggingface_hub are not installed in this env: bounded requests
-    # should report missing_dependency with an install command, write nothing.
+@pytest.fixture
+def no_datasets(monkeypatch):
+    """Force the 'datasets library unavailable' path deterministically."""
+    import terafold.data.hf_streaming as h
+
+    monkeypatch.setattr(h, "_import_datasets", lambda: None)
+
+
+def test_missing_dependency_is_graceful_and_no_download(tmp_path, no_datasets):
+    # When datasets is unavailable, bounded requests report missing_dependency
+    # with an install command and write nothing (no download attempted).
     out = str(tmp_path / "samples")
     res = sample_hf_dataset("lerobot/xvla-soft-fold", max_samples=10, out=out)
     assert res["status"] == "missing_dependency"
@@ -113,9 +121,9 @@ def test_missing_dependency_is_graceful_and_no_download(tmp_path):
     assert not os.path.exists(out)  # nothing downloaded / written
 
 
-def test_bounded_request_not_gated_for_large_source(tmp_path):
+def test_bounded_request_not_gated_for_large_source(tmp_path, no_datasets):
     # A bounded sample from a large source must NOT be blocked by the gate; it
-    # proceeds to the (missing) dependency check instead.
+    # proceeds to the dependency check instead (here forced missing).
     res = sample_hf_dataset("lerobot/xvla-soft-fold", max_samples=5, out=str(tmp_path / "s"))
     assert res["status"] == "missing_dependency"  # gate passed, dep missing
 
@@ -134,3 +142,24 @@ def test_extract_images_from_numpy():
     imgs = _extract_images(example)
     assert "observation.images.top" in imgs
     assert imgs["observation.images.top"].shape == (8, 8, 3)
+
+
+def test_video_dataset_without_backend_gives_clear_message(tmp_path, monkeypatch):
+    # LeRobot video dataset + no installed video backend -> clear, actionable
+    # message and NO download / output (requirement 5).
+    import terafold.data.hf_streaming as h
+
+    monkeypatch.setattr(h, "_video_backend", lambda: None)
+    info = {
+        "features": {"observation.images.top": {"dtype": "video", "shape": [480, 640, 3]}},
+        "total_episodes": 2,
+        "fps": 30,
+        "chunks_size": 1000,
+        "video_path": "videos/chunk-{episode_chunk:03d}/{video_key}/episode_{episode_index:06d}.mp4",
+    }
+    out = str(tmp_path / "o")
+    res = h._sample_lerobot_videos("x/y", info, 10, out, False, 0, 0)
+    assert res["status"] == "needs_video_decoder"
+    assert "video" in res["message"].lower()
+    assert res["camera"] == "observation.images.top"
+    assert not os.path.exists(out)  # nothing downloaded

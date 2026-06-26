@@ -24,6 +24,9 @@ data/episodes/
 data/lerobot/
 data/calib/
 data/fold_pairs/
+data/public_samples/
+data/public/
+data/cache/
 runs/
 *.pt
 *.ckpt

@@ -39,11 +39,21 @@ vision = [
     "opencv-python>=4.8",
     "pillow>=10.0",
 ]
-# LeRobot ecosystem + HuggingFace dataset tooling.
+# LeRobot ecosystem + HuggingFace dataset tooling (+ video decoding for mp4 frames).
 lerobot = [
     "lerobot",
     "huggingface_hub>=0.20",
     "datasets>=2.16",
+    "pillow>=10.0",
+    "av>=11.0",
+    "imageio>=2.31",
+    "imageio-ffmpeg>=0.4",
+]
+# Video frame decoding only (LeRobot video datasets store frames as mp4).
+video = [
+    "av>=11.0",
+    "imageio>=2.31",
+    "imageio-ffmpeg>=0.4",
 ]
 # Plotting / debug visualization.
 viz = [

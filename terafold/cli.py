@@ -554,14 +554,25 @@ def _print_hf_result(res: dict) -> None:
             f"{res.get('repo_id')}: {res.get('saved', res.get('episodes', 0))} "
             f"{'samples' if 'saved' in res else 'episodes'} -> {res.get('out')}"
         )
-        if res.get("rows") is not None:
-            _echo(f"  rows: {res['rows']}")
+        for k in ("source_format", "camera", "backend", "episodes_used", "episodes_downloaded", "rows"):
+            if res.get(k) is not None:
+                _echo(f"  {k}: {res[k]}")
         if res.get("note"):
             _echo(f"  note: {res['note']}")
         return
     if status == "missing_dependency":
         _err(res["message"])
         _err(f"Run:  {res['install_command']}")
+        raise typer.Exit(1)
+    if status == "needs_video_decoder":
+        _err(res.get("message", "Native LeRobot video decoding is needed."))
+        if res.get("available_cameras"):
+            _echo(f"  cameras: {res['available_cameras']}")
+        _err(f"Run:  {res.get('install_command', 'pip install av')}")
+        raise typer.Exit(3)
+    if status == "no_images_found":
+        _err(res.get("message", "No image fields found."))
+        _echo(f"  row keys: {res.get('row_keys')}")
         raise typer.Exit(1)
     if status == "requires_allow_large_download":
         _err(res.get("message", "This would require a large download."))
@@ -576,6 +587,45 @@ def _print_hf_result(res: dict) -> None:
     raise typer.Exit(1)
 
 
+@app.command("debug-hf-row")
+def debug_hf_row_cmd(
+    repo_id: str = typer.Option(...),
+    num_rows: int = typer.Option(3, help="How many streamed rows to inspect."),
+    streaming: bool = typer.Option(True, "--streaming/--no-streaming"),
+    split: str = typer.Option("train"),
+):
+    """Inspect streamed row schema: keys, types, image candidates, sample decisions."""
+    from terafold.data.hf_streaming import debug_hf_row
+
+    report = debug_hf_row(repo_id, num_rows=num_rows, streaming=streaming, split=split)
+    if report.get("status") == "missing_dependency":
+        _err(report["message"])
+        _err(f"Run:  {report['install_command']}")
+        raise typer.Exit(1)
+    if report.get("status") not in ("ok", None):
+        _err(f"{report.get('status')}: {report.get('error')}")
+        raise typer.Exit(1)
+    _echo(f"repo_id: {report['repo_id']}")
+    _echo(f"info image/video keys: {report.get('info_image_or_video_keys')}")
+    _echo(f"video_path template  : {report.get('video_path_template')}")
+    _echo(f"video backend        : {report.get('video_backend')}   total_episodes: {report.get('total_episodes')}")
+    for row in report.get("rows", []):
+        _echo("")
+        _echo(f"── row {row['index']} ── keys: {row['keys']}")
+        for k, d in row["fields"].items():
+            tag = ""
+            if d.get("image_candidate"):
+                if d.get("coerce_ok"):
+                    tag = f"  [IMAGE ✓ {d.get('coerce_kind')} -> {d.get('coerced_shape')}]"
+                else:
+                    tag = f"  [image? ✗ {d.get('coerce_kind')}: {d.get('coerce_reason')}]"
+            shape = d.get("shape") or d.get("len") or d.get("nested_keys") or d.get("pil") or ""
+            _echo(f"    {k}: {d['type']} {shape}{tag}")
+        _echo(f"    state_dim={row['state_dim']} action_dim={row['action_dim']} "
+              f"image_usable_in_row={row['image_usable_in_row']}")
+        _echo(f"    -> {row['sampling_decision']}")
+
+
 @app.command("sample-hf-dataset")
 def sample_hf_dataset_cmd(
     repo_id: str = typer.Option(..., help="HuggingFace dataset repo id."),
@@ -585,14 +635,28 @@ def sample_hf_dataset_cmd(
     convert: bool = typer.Option(
         True, "--convert/--no-convert", help="Convert images to TeraFold perception format."
     ),
+    image_key: Optional[str] = typer.Option(
+        None, help="Force a specific image/camera field (e.g. observation.images.top)."
+    ),
+    frames_per_episode: int = typer.Option(
+        0, help="(video datasets) max frames per episode; 0 = auto."
+    ),
+    frame_stride: int = typer.Option(
+        0, help="(video datasets) decode every Nth frame; 0 = ~1 fps."
+    ),
     allow_large_download: bool = typer.Option(False, "--allow-large-download"),
 ):
-    """Stream a bounded image sample from a public dataset (NO full download)."""
+    """Stream a bounded image sample from a public dataset (NO full download).
+
+    For LeRobot *video* datasets the frames live in MP4s, so a bounded set of
+    episode videos is downloaded and decoded (needs a video backend such as av).
+    """
     from terafold.data.hf_streaming import sample_hf_dataset
 
     res = sample_hf_dataset(
         repo_id, max_samples=max_samples, out=out, split=split,
-        convert=convert, allow_large_download=allow_large_download,
+        convert=convert, image_key=image_key, frames_per_episode=frames_per_episode,
+        frame_stride=frame_stride, allow_large_download=allow_large_download,
     )
     _print_hf_result(res)
 
