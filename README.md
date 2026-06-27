@@ -351,6 +351,52 @@ direction, SO-101 asset report, `control: none (simulation only)`,
 `ee-only`/`cloth-proxy` fall back to the 2D renderer so the demo still produces a
 video.
 
+## 13b. Physical bus-servo arm — safe real-motion workflow
+
+For a custom **7-DOF bus-servo arm** on a **Waveshare Bus Servo Adapter (A)**
+(DC 9–12.6V, USB-C serial). Everything defaults to **dry-run**. Real motion is
+**double-gated** (`--enable-motion` + `--i-understand-this-moves-hardware`) **and**
+requires a *confirmed* bus-servo protocol — and there is **no verified protocol in
+the repo**, so TeraFold refuses every read/move with *"Waveshare bus servo
+protocol not confirmed; refusing to move."* (it never guesses packet bytes). The
+config (`configs/robots/physical_7dof_waveshare.yaml`) carries conservative
+placeholder limits only.
+
+**Safe to run first (read-only, never moves):**
+```bash
+python3 -m terafold robot-scan --save-json runs/robot_scan/ports.json
+python3 -m terafold robot-probe --robot physical_7dof_waveshare --port auto --read-only
+python3 -m terafold servo-scan --robot physical_7dof_waveshare --port auto --read-only   # refuses (no protocol)
+python3 -m terafold robot-estop --robot physical_7dof_waveshare --port auto              # always safe
+```
+
+**Dry-run ghost fold (prints the air path ≥10 cm above the table, no motion):**
+```bash
+python3 -m terafold real-ghost-fold --robot physical_7dof_waveshare \
+    --plan-json runs/demo_image/claude_result.json --height-clearance-m 0.10 --speed slow --dry-run
+```
+
+**Manual teach + replay (joint-space, no kinematics needed):**
+```bash
+python3 -m terafold teach-ghost-fold --robot physical_7dof_waveshare --out data/real_demos/ghost_fold_001.json
+python3 -m terafold replay-joint-demo --robot physical_7dof_waveshare \
+    --demo data/real_demos/ghost_fold_001.json --speed very_slow --dry-run
+```
+
+**Commands that *attempt* real hardware (currently refuse at the protocol gate):**
+```bash
+# Tiny one-servo nudge (moves one servo a few degrees, then returns):
+python3 -m terafold servo-nudge --robot physical_7dof_waveshare --port auto \
+    --servo-id 1 --delta-deg 3 --speed slow --enable-motion --i-understand-this-moves-hardware
+# Real ghost fold / real replay: add --enable-motion --i-understand-this-moves-hardware
+```
+`servo-nudge` refuses deltas >5° unless `--dangerous-allow-larger-motion`, and
+refuses to move blind unless `--allow-open-loop-nudge`. Image/table-based real
+motion (`real-image-fold`) refuses without full table calibration. Every real
+command logs to `runs/real_motion_logs/`. **To enable motion later:** confirm the
+servo protocol and wire a verified `command_backend` into
+`WaveshareBusServoAdapter` — only then does `protocol_confirmed` flip to True.
+
 ## 14. Record real demos
 
 ```bash

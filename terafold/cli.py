@@ -555,6 +555,307 @@ def robot_info_template_cmd(
     _ok(f"Wrote robot info template -> {out}")
 
 
+# ----------------------------------------------------------------------
+# Physical bus-servo arm: SAFE real-motion workflow (default dry-run).
+# Real motion is double-gated AND requires a confirmed protocol (none yet).
+# ----------------------------------------------------------------------
+
+
+def _load_arm(robot: str, port: str):
+    from terafold.robot.arm_config import load_arm_config
+    from terafold.robot.waveshare_bus_servo import WaveshareBusServoAdapter
+
+    cfg = load_arm_config(robot)
+    if port and port != "auto":
+        cfg.port = port
+    adapter = WaveshareBusServoAdapter(
+        port=cfg.port, baudrate=cfg.baudrate, baud_candidates=cfg.baudrate_candidates,
+        dof=cfg.dof, joint_names=cfg.joint_names,
+    )
+    return cfg, adapter
+
+
+@app.command("robot-probe")
+def robot_probe_cmd(
+    robot: str = typer.Option(..., help="Robot config name (e.g. physical_7dof_waveshare)."),
+    port: str = typer.Option("auto", help="Serial port, or 'auto'."),
+    read_only: bool = typer.Option(True, "--read-only/--no-read-only",
+                                   help="Read-only (default). Never moves motors."),
+    allow_torque: bool = typer.Option(False, "--allow-torque",
+                                      help="Explicitly allow torque (still refused: protocol unconfirmed)."),
+):
+    """Identify the serial port + Waveshare adapter. READ-ONLY; never moves motors."""
+    cfg, adapter = _load_arm(robot, port)
+    _echo(f"Robot: {cfg.robot_name}  dof={cfg.dof}  adapter={cfg.adapter}")
+    report = adapter.list_ports()
+    if not report["ports"]:
+        _echo("No serial ports found. Plug in the USB-C cable + DC 9-12.6V power.")
+    for p in report["ports"]:
+        flag = " <-- likely robot" if p["likely_robot"] else ""
+        _echo(f"  {p['device']}  {p.get('description') or ''}{flag}")
+    ident = adapter.identify()
+    _echo("\nAdapter identification (USB descriptors only, no bytes sent):")
+    _echo(f"  device={ident['device']}  likely_adapter={ident['likely_adapter']} "
+          f"(conf {ident['confidence']:.1f})  product={ident.get('product')}")
+    _echo(f"  {ident['note']}")
+    if allow_torque:
+        _err("Torque was requested but is REFUSED: protocol not confirmed.")
+    _echo(f"\n  protocol_confirmed={adapter.protocol_confirmed}  (motion disabled)")
+    _echo("  Next: `terafold servo-scan` (needs a confirmed protocol) or "
+          "`terafold robot-info-template` to record your hardware.")
+
+
+@app.command("servo-scan")
+def servo_scan_cmd(
+    robot: str = typer.Option(..., help="Robot config name."),
+    port: str = typer.Option("auto", help="Serial port, or 'auto'."),
+    read_only: bool = typer.Option(True, "--read-only/--no-read-only", help="Read-only (default)."),
+    id_min: int = typer.Option(1), id_max: int = typer.Option(30),
+):
+    """Discover servo IDs — only if the protocol is confirmed; otherwise refuses."""
+    cfg, adapter = _load_arm(robot, port)
+    res = adapter.scan_servo_ids(id_min, id_max)
+    if not res.get("supported"):
+        _err(res["reason"])
+        _echo("Next steps:")
+        for s in res.get("next_steps", []):
+            _echo(f"  - {s}")
+        raise typer.Exit(1)
+    _ok(f"Found servo IDs: {res['servo_ids']}")
+
+
+@app.command("servo-nudge")
+def servo_nudge_cmd(
+    robot: str = typer.Option(..., help="Robot config name."),
+    port: str = typer.Option("auto"),
+    servo_id: int = typer.Option(..., help="Which servo to nudge."),
+    delta_deg: float = typer.Option(3.0, help="Tiny angle delta (default 3, hard limit 5)."),
+    speed: str = typer.Option("slow", help="very_slow | slow."),
+    enable_motion: bool = typer.Option(False, "--enable-motion"),
+    acknowledge: bool = typer.Option(False, "--i-understand-this-moves-hardware"),
+    dangerous_allow_larger_motion: bool = typer.Option(False, "--dangerous-allow-larger-motion"),
+    allow_open_loop_nudge: bool = typer.Option(False, "--allow-open-loop-nudge"),
+):
+    """Move ONE servo by a tiny amount, then return it. Default = refuse (dry-run)."""
+    from terafold.robot.real_motion import (check_nudge_delta, countdown, motion_logger,
+                                            print_estop_instructions)
+    from terafold.robot.safety import SafetyError, require_motion_enabled
+    from terafold.robot.waveshare_bus_servo import PROTOCOL_NEXT_STEPS, PROTOCOL_REFUSAL
+
+    cfg, adapter = _load_arm(robot, port)
+    log = motion_logger("servo_nudge")
+    log.log("servo_nudge_request", {"robot": robot, "servo_id": servo_id, "delta_deg": delta_deg,
+                                     "speed": speed, "enable_motion": enable_motion,
+                                     "acknowledge": acknowledge})
+    # 1. Two-flag human gate.
+    try:
+        require_motion_enabled(enable_motion, acknowledge)
+    except SafetyError as e:
+        _err(str(e))
+        log.log("refused", {"reason": "flags"})
+        raise typer.Exit(1)
+    # 2. Delta limits.
+    try:
+        check_nudge_delta(delta_deg, cfg.hard_delta_limit_deg, dangerous_allow_larger_motion)
+    except SafetyError as e:
+        _err(str(e))
+        log.log("refused", {"reason": "delta"})
+        raise typer.Exit(1)
+    if abs(delta_deg) > cfg.max_delta_per_test_deg:
+        _echo(f"[warn] delta {delta_deg:.1f} deg exceeds the default tiny max "
+              f"{cfg.max_delta_per_test_deg:.1f} deg (allowed, but be careful).")
+    # 3. Closed-loop check.
+    adapter.open()
+    pos = adapter.read_position(servo_id)
+    if pos is None and not allow_open_loop_nudge:
+        _err("Cannot read the current servo position (protocol unconfirmed). Refusing "
+             "to move blind. Pass --allow-open-loop-nudge for a tiny low-speed pulse "
+             "ONLY if you accept the risk.")
+        log.log("refused", {"reason": "no_position"})
+        adapter.close()
+        raise typer.Exit(1)
+    if pos is None:
+        _echo("[warn] OPEN-LOOP nudge: current position is UNKNOWN. This is risky — "
+              "keep a hand on the power switch.")
+    # 4. Protocol gate (the real safety wall — no verified protocol exists yet).
+    if not adapter.supports_motion:
+        _err(PROTOCOL_REFUSAL)
+        for s in PROTOCOL_NEXT_STEPS:
+            _echo(f"  - {s}")
+        log.log("refused", {"reason": "protocol_unconfirmed"})
+        adapter.close()
+        raise typer.Exit(1)
+    # 5. Verified-backend path (only reachable once a real protocol is wired).
+    print_estop_instructions(_echo)
+    countdown(5, _echo)
+    start = pos if pos is not None else 0.0
+    try:
+        adapter.write_position(servo_id, start + delta_deg, speed=speed)
+        adapter.write_position(servo_id, start, speed=speed)  # return to start
+        log.log("moved", {"servo_id": servo_id, "delta_deg": delta_deg})
+        _ok(f"Nudged servo {servo_id} by {delta_deg} deg and returned.")
+    finally:
+        adapter.close()
+
+
+@app.command("real-ghost-fold")
+def real_ghost_fold_cmd(
+    robot: str = typer.Option(..., help="Robot config name."),
+    plan_json: str = typer.Option(..., help="A FoldPlan / demo result JSON."),
+    height_clearance_m: float = typer.Option(0.10, help="Min height above the table (>=0.10)."),
+    speed: str = typer.Option("slow", help="very_slow | slow."),
+    dry_run: bool = typer.Option(True, "--dry-run/--no-dry-run"),
+    enable_motion: bool = typer.Option(False, "--enable-motion"),
+    acknowledge: bool = typer.Option(False, "--i-understand-this-moves-hardware"),
+):
+    """Trace the fold path IN THE AIR above the table. Never touches the towel."""
+    from terafold.robot.real_motion import ghost_fold_trajectory, motion_logger
+    from terafold.robot.safety import SafetyError, require_motion_enabled
+
+    cfg, adapter = _load_arm(robot, port="auto")
+    clearance = max(height_clearance_m, cfg.table_clearance_m)
+    ghost = ghost_fold_trajectory(plan_json, height_clearance_m=clearance)
+    log = motion_logger("real_ghost_fold")
+    log.log("ghost_request", {"robot": robot, "clearance_m": clearance, "speed": speed,
+                              "dry_run": dry_run, "enable_motion": enable_motion})
+    _echo(f"Ghost fold (AIR-ONLY): {ghost['num_waypoints']} waypoints, "
+          f"min_z={ghost['min_z']}m (clearance {clearance}m), touches_table={ghost['touches_table']}")
+    for w in ghost["waypoints"]:
+        _echo(f"  {w['phase']:<10} xyz={w['xyz']} gripper={w['gripper']}")
+    _echo(f"  {ghost['note']}")
+
+    real = enable_motion or acknowledge or not dry_run
+    if not real:
+        _ok("DRY-RUN: nothing moved. To execute above the table, you need joint-space "
+            "waypoints — use `teach-ghost-fold` then `replay-joint-demo`.")
+        return
+    # Real motion requested.
+    try:
+        require_motion_enabled(enable_motion, acknowledge)
+    except SafetyError as e:
+        _err(str(e))
+        raise typer.Exit(1)
+    # Kinematics are unknown AND the protocol is unconfirmed -> refuse, route to teach.
+    _err("Cannot execute a Cartesian ghost fold: the arm's kinematics are unknown and "
+         "the bus-servo protocol is not confirmed. Record a joint-space ghost fold with "
+         "`teach-ghost-fold`, then `replay-joint-demo` (very_slow, above the table).")
+    log.log("refused", {"reason": "no_kinematics_or_protocol"})
+    raise typer.Exit(1)
+
+
+@app.command("teach-ghost-fold")
+def teach_ghost_fold_cmd(
+    robot: str = typer.Option(..., help="Robot config name."),
+    out: str = typer.Option("data/real_demos/ghost_fold_001.json"),
+    port: str = typer.Option("auto"),
+):
+    """Manually pose the arm at each waypoint and record joint positions."""
+    from terafold.robot.real_motion import (GHOST_FOLD_POSES, motion_logger,
+                                            record_teach_demo, save_joint_demo)
+
+    cfg, adapter = _load_arm(robot, port)
+    log = motion_logger("teach_ghost_fold")
+    _echo("MANUAL TEACH MODE — move the arm BY HAND (torque off / loose).")
+    _echo("Keep every pose ABOVE the table; do NOT touch the cloth.")
+    _echo(f"Poses: {', '.join(GHOST_FOLD_POSES)}\n")
+    demo = record_teach_demo(adapter, robot=cfg.robot_name, dof=cfg.dof,
+                             joint_names=cfg.joint_names, log=_echo)
+    save_joint_demo(out, demo)
+    log.log("teach_saved", {"out": out, "has_positions": demo.has_positions()})
+    _ok(f"Saved demo -> {out}")
+    if not demo.has_positions():
+        _echo("[warn] No servo positions were captured (protocol unconfirmed). This is a "
+              "skeleton; confirm the protocol before it can be replayed.")
+    _echo("Replay (dry-run):  terafold replay-joint-demo --robot "
+          f"{robot} --demo {out} --speed very_slow --dry-run")
+
+
+@app.command("replay-joint-demo")
+def replay_joint_demo_cmd(
+    robot: str = typer.Option(..., help="Robot config name."),
+    demo: str = typer.Option(..., help="A joint-space demo JSON from teach-ghost-fold."),
+    port: str = typer.Option("auto"),
+    speed: str = typer.Option("very_slow"),
+    dry_run: bool = typer.Option(True, "--dry-run/--no-dry-run"),
+    enable_motion: bool = typer.Option(False, "--enable-motion"),
+    acknowledge: bool = typer.Option(False, "--i-understand-this-moves-hardware"),
+):
+    """Replay a taught joint-space ghost fold. Default = dry-run (prints only)."""
+    from terafold.robot.real_motion import load_joint_demo, motion_logger
+    from terafold.robot.safety import SafetyError, require_motion_enabled
+    from terafold.robot.waveshare_bus_servo import PROTOCOL_REFUSAL
+
+    cfg, adapter = _load_arm(robot, port)
+    d = load_joint_demo(demo)
+    log = motion_logger("replay_joint_demo")
+    _echo(f"Demo: {d.robot}  {len(d.waypoints)} waypoints  has_positions={d.has_positions()}")
+    for w in d.waypoints:
+        _echo(f"  {w['name']:<16} positions={w.get('servo_positions')}")
+
+    real = enable_motion or acknowledge or not dry_run
+    if not real:
+        _ok(f"DRY-RUN at speed={speed}: nothing moved.")
+        return
+    try:
+        require_motion_enabled(enable_motion, acknowledge)
+    except SafetyError as e:
+        _err(str(e))
+        raise typer.Exit(1)
+    if not d.has_positions():
+        _err("Demo has no recorded servo positions — re-teach with a confirmed protocol.")
+        raise typer.Exit(1)
+    if not adapter.supports_motion:
+        _err(PROTOCOL_REFUSAL)
+        log.log("refused", {"reason": "protocol_unconfirmed"})
+        raise typer.Exit(1)
+    _err("(verified-backend replay path not reachable: no confirmed protocol).")
+    raise typer.Exit(1)
+
+
+@app.command("robot-estop")
+def robot_estop_cmd(
+    robot: str = typer.Option(..., help="Robot config name."),
+    port: str = typer.Option("auto"),
+):
+    """EMERGENCY STOP: disable torque if possible, close the port, cut power by hand."""
+    from terafold.robot.real_motion import print_estop_instructions
+
+    _cfg, adapter = _load_arm(robot, port)
+    res = adapter.emergency_stop()
+    _echo(f"torque_off_attempted={res['torque_off_attempted']} "
+          f"torque_off_ok={res['torque_off_ok']} port_closed={res['port_closed']}")
+    if not res["protocol_confirmed"]:
+        _echo("[warn] Protocol unconfirmed: torque-off bytes were NOT sent.")
+    _err("CUT POWER MANUALLY NOW:")
+    for line in res["manual_instructions"]:
+        _echo(f"  - {line}")
+    print_estop_instructions(_echo)
+
+
+@app.command("real-image-fold")
+def real_image_fold_cmd(
+    robot: str = typer.Option(..., help="Robot config name."),
+    image: str = typer.Option(..., help="Photo of the towel."),
+    calibration: Optional[str] = typer.Option(None, help="Homography calibration JSON."),
+    enable_motion: bool = typer.Option(False, "--enable-motion"),
+    acknowledge: bool = typer.Option(False, "--i-understand-this-moves-hardware"),
+):
+    """Image/table-based REAL motion — refuses without full table calibration."""
+    from terafold.robot.real_motion import image_real_motion_gate
+
+    gate = image_real_motion_gate(
+        homography_calibration=calibration, enable_motion=enable_motion, acknowledge=acknowledge,
+    )
+    if not gate["allowed"]:
+        _err(gate["message"])
+        _echo("Missing:")
+        for m in gate["missing"]:
+            _echo(f"  - {m}")
+        raise typer.Exit(1)
+    _err("(unreachable: image-based real motion still requires a confirmed protocol).")
+    raise typer.Exit(1)
+
+
 @app.command("export-trajectory")
 def export_trajectory_cmd(
     plan_json: str = typer.Option(..., help="A FoldPlan / demo result JSON."),

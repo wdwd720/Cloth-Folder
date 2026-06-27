@@ -1,0 +1,58 @@
+# Physical 7-DOF bus-servo arm via a Waveshare Bus Servo Adapter (A).
+#
+# SAFETY: motion is DISABLED by default. The bus-servo serial protocol for this
+# arm is NOT confirmed in the repo, so TeraFold refuses to send any motion until a
+# verified protocol/backend is wired (see terafold/robot/waveshare_bus_servo.py).
+# The limits below are CONSERVATIVE PLACEHOLDERS for safe first tests only — do
+# NOT use them for aggressive IK.
+
+robot_name: physical_7dof_waveshare
+dof: 7
+adapter: waveshare_bus_servo
+
+# Serial. "auto" picks the most likely robot port from `terafold robot-scan`.
+port: auto
+baudrate_candidates: [1000000, 115200]
+
+# Hardware (for reference / the robot-info template).
+hardware:
+  arm: "custom 7-DOF bus-servo arm"
+  adapter: "Waveshare Bus Servo Adapter (A)"
+  serial: "USB-C serial"
+  power: "DC 9-12.6V"
+  bus_connector_pinout: "G / V / D"
+
+# Servo IDs are UNKNOWN until a confirmed protocol allows a safe scan.
+servo_ids: unknown
+
+joint_names:
+  - base_yaw
+  - shoulder_pitch
+  - shoulder_roll
+  - elbow_pitch
+  - wrist_pitch
+  - wrist_roll
+  - gripper
+
+# CONSERVATIVE temporary limits (degrees). Units are placeholders until the servo
+# encoder range/protocol is confirmed. Keep them small for first tests.
+joint_limits_deg:
+  base_yaw:        [-45, 45]
+  shoulder_pitch:  [-35, 35]
+  shoulder_roll:   [-35, 35]
+  elbow_pitch:     [-45, 45]
+  wrist_pitch:     [-40, 40]
+  wrist_roll:      [-60, 60]
+  gripper:         [0, 40]
+
+# Very slow first-test motion.
+safe_speed: very_slow          # very_slow | slow (no fast option for first tests)
+max_delta_per_test_deg: 3.0    # tiny single-servo nudge default
+hard_delta_limit_deg: 5.0      # refuse above this without --dangerous-allow-larger-motion
+
+# Keep the gripper at least this far above the assumed table during ghost tests.
+table_clearance_m: 0.10
+
+# Motion is OFF unless explicitly enabled with both hardware flags AND a confirmed
+# protocol. Default is always dry-run.
+motion_default: disabled
