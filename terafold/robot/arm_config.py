@@ -25,15 +25,22 @@ class PhysicalArmConfig:
     robot_name: str = "physical_arm"
     dof: int = 7
     adapter: str = "waveshare_bus_servo"
+    protocol: Optional[str] = None
     port: str = "auto"
+    baudrate: Optional[int] = None
     baudrate_candidates: List[int] = field(default_factory=lambda: [1000000, 115200])
     servo_ids: Any = "unknown"
+    active_servo_ids: List[int] = field(default_factory=list)
     joint_names: List[str] = field(default_factory=list)
     joint_limits_deg: Dict[str, List[float]] = field(default_factory=dict)
     safe_speed: str = "very_slow"
     max_delta_per_test_deg: float = 3.0
     hard_delta_limit_deg: float = 5.0
     table_clearance_m: float = 0.10
+    default_speed_units: int = 300
+    default_acc_units: int = 20
+    safe_position_units: List[int] = field(default_factory=lambda: [400, 3700])
+    max_sweep_units: int = 80
     motion_default: str = "disabled"
     hardware: Dict[str, Any] = field(default_factory=dict)
     source_path: Optional[str] = None
@@ -43,7 +50,9 @@ class PhysicalArmConfig:
         return str(self.motion_default).lower() in ("enabled", "on", "true")
 
     @property
-    def baudrate(self) -> int:
+    def baud(self) -> int:
+        if self.baudrate:
+            return int(self.baudrate)
         return int(self.baudrate_candidates[0]) if self.baudrate_candidates else 1000000
 
     @classmethod

@@ -397,6 +397,49 @@ command logs to `runs/real_motion_logs/`. **To enable motion later:** confirm th
 servo protocol and wire a verified `command_backend` into
 `WaveshareBusServoAdapter` — only then does `protocol_confirmed` flip to True.
 
+### 13c. Confirmed SMS/STS backend — image → plan → real ghost fold
+
+The bus-servo protocol is confirmed: **sms_sts @ 1,000,000 baud** via the vendor
+`scservo_sdk` (`vendor/waveshare/STServo_Python/stservo-env`, gitignored — keep it
+locally; `pip install pyserial`). `WaveshareSmsStsBackend` uses the official
+`WritePosEx(id, pos, speed, acc)` / `ReadPosSpeed(id)` / `ping(id)`, and
+`protocol_confirmed` is True only after the port opens at 1 Mbaud, ≥1 configured
+servo pings, and a read succeeds. Configured active IDs: **1, 2, 5, 6** (IDs 3, 4,
+7 remain disabled). Still **no table contact** — the first real move is a ghost.
+
+**Step 1 — map servo IDs to joints (moves one servo a few units, then returns):**
+```bash
+python3 -m terafold map-servo-joints --robot physical_7dof_waveshare \
+  --port /dev/cu.usbmodem5AB01803321 --ids 1,2,5,6 --delta-units 40 --speed very_slow \
+  --enable-motion --i-understand-this-moves-hardware
+# Saves configs/robots/physical_7dof_waveshare_joint_map.yaml
+```
+
+**Step 2 — dry-run the image → plan → ghost fold (runs real perception, no motion):**
+```bash
+python3 -m terafold real-image-ghost-fold --image ~/Downloads/towel_demo_pic.png \
+  --robot physical_7dof_waveshare --port /dev/cu.usbmodem5AB01803321 \
+  --height-clearance-m 0.10 --speed very_slow --dry-run
+```
+Prints the detected corners, fold direction, image-space + normalized grasp/place,
+the assumed table-space (uncalibrated), and the air-only ghost path.
+
+**Step 3 — real ghost fold (only after a joint map exists):**
+```bash
+python3 -m terafold real-image-ghost-fold --image ~/Downloads/towel_demo_pic.png \
+  --robot physical_7dof_waveshare --port /dev/cu.usbmodem5AB01803321 \
+  --height-clearance-m 0.10 --speed very_slow \
+  --enable-motion --i-understand-this-moves-hardware
+```
+This executes a **conservative, bounded base-yaw sweep** derived from the fold
+direction (no Cartesian IK — kinematics are unknown), staying at the arm's current
+height (no vertical motion, no table contact), then returns home. It refuses
+without the flags, without a joint map, without ping/read on the configured IDs, if
+positions can't be read, or if any target leaves the safe unit range; it never
+closes the gripper hard; it prints a countdown, logs to `runs/real_motion_logs/`,
+and Ctrl+C stops + closes the port (then cut power). **Image/table contact folding
+stays refused** until full calibration exists.
+
 ## 14. Record real demos
 
 ```bash

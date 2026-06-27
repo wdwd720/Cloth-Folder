@@ -41,3 +41,6 @@ runs/
 
 # Keep small sample/config assets if explicitly added with `git add -f`
 !configs/*.yaml
+
+# Vendored SDKs / virtualenvs (machine-specific; loaded by local path)
+vendor/

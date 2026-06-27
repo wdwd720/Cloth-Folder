@@ -18,7 +18,8 @@ from terafold.robot.safety import SafetyError
 __all__ = [
     "JointDemo", "save_joint_demo", "load_joint_demo",
     "GHOST_FOLD_POSES", "record_teach_demo",
-    "ghost_fold_trajectory", "image_real_motion_gate",
+    "ghost_fold_trajectory", "ghost_fold_core", "joint_space_ghost_fold",
+    "image_real_motion_gate",
     "IMAGE_CALIBRATION_REFUSAL", "estop_instructions", "print_estop_instructions",
     "countdown", "check_nudge_delta", "motion_logger", "SPEED_PRESETS",
 ]
@@ -140,27 +141,14 @@ def _load_plan(path: str) -> Dict[str, Any]:
     return d
 
 
-def ghost_fold_trajectory(
-    plan_json: str,
-    height_clearance_m: float = 0.10,
-    table_z: float = 0.0,
-    max_gripper_close: float = 0.5,
-) -> Dict[str, Any]:
-    """Lift the planned fold path into the AIR above the table (never touch it).
-
-    Every waypoint z is raised to at least ``table_z + height_clearance_m`` and the
-    gripper is never closed below ``max_gripper_close`` (no hard pinch). This is a
-    Cartesian *preview*; converting it to joint commands needs known kinematics OR
-    a taught joint demo (see :func:`record_teach_demo`).
-    """
-    plan = _load_plan(plan_json)
-    traj = plan.get("trajectory") or {}
-    wp = traj.get("waypoints") or []
-    grip = traj.get("gripper") or [1.0] * len(wp)
-    phases = traj.get("phases") or [""] * len(wp)
+def ghost_fold_core(wp, grip, phases, height_clearance_m=0.10, table_z=0.0,
+                    max_gripper_close=0.5) -> Dict[str, Any]:
+    """Lift a trajectory into the AIR above the table; gripper never closes hard."""
     floor = table_z + float(height_clearance_m)
     out = []
     min_z = float("inf")
+    grip = grip or [1.0] * len(wp)
+    phases = phases or [""] * len(wp)
     for i, p in enumerate(wp):
         x, y, z = float(p[0]), float(p[1]), float(p[2])
         lz = max(z, floor)
@@ -178,8 +166,56 @@ def ghost_fold_trajectory(
         "waypoints": out,
         "note": ("AIR-ONLY ghost fold: lifted >= clearance above the table; gripper "
                  "kept open (no hard close). Cartesian preview — needs kinematics or "
-                 "a taught joint demo to execute."),
+                 "a taught/mapped joint demo to execute."),
     }
+
+
+def ghost_fold_trajectory(plan_json: str, height_clearance_m: float = 0.10,
+                          table_z: float = 0.0, max_gripper_close: float = 0.5) -> Dict[str, Any]:
+    """Cartesian air-only ghost fold loaded from a plan JSON file."""
+    plan = _load_plan(plan_json)
+    traj = plan.get("trajectory") or {}
+    return ghost_fold_core(traj.get("waypoints") or [], traj.get("gripper"),
+                           traj.get("phases"), height_clearance_m, table_z, max_gripper_close)
+
+
+# Fold direction -> base-yaw sweep sign (the moving half travels toward the crease).
+_DIR_SWEEP = {"right_to_left": -1, "left_to_right": +1, "top_to_bottom": -1, "bottom_to_top": +1}
+
+
+def joint_space_ghost_fold(fold_direction, joint_map, current_positions,
+                           max_sweep_units: int = 80, safe_units=(400, 3700),
+                           speed: int = 300, acc: int = 20) -> Dict[str, Any]:
+    """A CONSERVATIVE joint-space ghost fold DERIVED from the plan + joint map.
+
+    Without kinematics we cannot do Cartesian IK, so the ghost is a small, bounded
+    **base-yaw sweep** that traces the fold direction horizontally (no vertical
+    motion → stays at the arm's current height). Targets are relative to the read
+    current positions (never hardcoded), clamped to the safe range. Only the
+    base_yaw servo is commanded; the rest hold position.
+    """
+    base_id = joint_map.id_for_joint("base_yaw")
+    if base_id is None:
+        return {"ok": False, "needed_joint": "base_yaw",
+                "refusal": "joint 'base_yaw' is not mapped; run `map-servo-joints` first."}
+    cur = current_positions.get(base_id)
+    if cur is None:
+        return {"ok": False, "refusal": f"cannot read base_yaw (servo {base_id}) current position."}
+    sign = int(joint_map.sign_for_id(base_id)) * _DIR_SWEEP.get(fold_direction, -1)
+    sweep = int(round(max_sweep_units)) * sign
+    lo, hi = int(safe_units[0]), int(safe_units[1])
+    steps = [("hover_start", int(cur)),
+             ("sweep_toward_place", int(cur) + sweep),
+             ("return_home", int(cur))]
+    bad = {k: v for k, v in steps if not (lo <= v <= hi)}
+    if bad:
+        return {"ok": False, "refusal": f"sweep targets {bad} outside safe range [{lo}, {hi}]."}
+    waypoints = [{"label": k, "servo_id": int(base_id), "target_units": int(v),
+                  "speed": int(speed), "acc": int(acc)} for k, v in steps]
+    return {"ok": True, "base_id": int(base_id), "sweep_units": int(sweep),
+            "waypoints": waypoints,
+            "note": ("horizontal base-yaw sweep tracing the fold direction; no vertical "
+                     "motion (stays at the current height). Only base_yaw is commanded.")}
 
 
 # ----------------------------------------------------------------------

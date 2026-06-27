@@ -10,8 +10,10 @@ robot_name: physical_7dof_waveshare
 dof: 7
 adapter: waveshare_bus_servo
 
-# Serial. "auto" picks the most likely robot port from `terafold robot-scan`.
-port: auto
+# CONFIRMED protocol + serial.
+protocol: sms_sts
+port: /dev/cu.usbmodem5AB01803321
+baudrate: 1000000
 baudrate_candidates: [1000000, 115200]
 
 # Hardware (for reference / the robot-info template).
@@ -22,8 +24,16 @@ hardware:
   power: "DC 9-12.6V"
   bus_connector_pinout: "G / V / D"
 
-# Servo IDs are UNKNOWN until a confirmed protocol allows a safe scan.
+# Confirmed responding servo IDs. Unmapped IDs (3, 4, 7) remain DISABLED until
+# verified — do not assume they exist.
 servo_ids: unknown
+active_servo_ids: [1, 2, 5, 6]
+
+# Motion tuning (raw servo units; STS counts are 0..4095).
+default_speed_units: 300      # very slow
+default_acc_units: 20         # gentle
+safe_position_units: [400, 3700]   # global guard; refuse targets outside this
+max_sweep_units: 80           # max relative move for a ghost sweep (tiny)
 
 joint_names:
   - base_yaw

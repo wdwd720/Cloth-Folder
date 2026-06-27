@@ -569,7 +569,7 @@ def _load_arm(robot: str, port: str):
     if port and port != "auto":
         cfg.port = port
     adapter = WaveshareBusServoAdapter(
-        port=cfg.port, baudrate=cfg.baudrate, baud_candidates=cfg.baudrate_candidates,
+        port=cfg.port, baudrate=cfg.baud, baud_candidates=cfg.baudrate_candidates,
         dof=cfg.dof, joint_names=cfg.joint_names,
     )
     return cfg, adapter
@@ -854,6 +854,80 @@ def real_image_fold_cmd(
         raise typer.Exit(1)
     _err("(unreachable: image-based real motion still requires a confirmed protocol).")
     raise typer.Exit(1)
+
+
+@app.command("map-servo-joints")
+def map_servo_joints_cmd(
+    robot: str = typer.Option(..., help="Robot config name."),
+    port: str = typer.Option(..., help="Serial port (e.g. /dev/cu.usbmodem...)."),
+    ids: str = typer.Option(..., help="Comma-separated servo IDs, e.g. 1,2,5,6."),
+    delta_units: int = typer.Option(40, help="Tiny nudge in servo units."),
+    speed: str = typer.Option("very_slow"),
+    enable_motion: bool = typer.Option(False, "--enable-motion"),
+    acknowledge: bool = typer.Option(False, "--i-understand-this-moves-hardware"),
+):
+    """Nudge one servo at a time, ask which joint moved, and save a joint map."""
+    from terafold.robot.arm_config import load_arm_config
+    from terafold.robot.real_image_ghost import run_map_servo_joints
+    from terafold.robot.real_motion import motion_logger
+    from terafold.robot.safety import SafetyError, require_motion_enabled
+    from terafold.robot.waveshare_sms_sts_backend import WaveshareSmsStsBackend
+
+    id_list = [int(x) for x in ids.split(",") if x.strip()]
+    try:
+        require_motion_enabled(enable_motion, acknowledge)
+    except SafetyError as e:
+        _err(str(e))
+        raise typer.Exit(1)
+    cfg = load_arm_config(robot)
+    logger = motion_logger("map_servo_joints")
+    backend = WaveshareSmsStsBackend(
+        port=port, baudrate=cfg.baud, active_ids=id_list,
+        default_speed=cfg.default_speed_units, default_acc=cfg.default_acc_units,
+        safe_min_units=cfg.safe_position_units[0], safe_max_units=cfg.safe_position_units[1],
+        logger=logger,
+    )
+    backend.confirm()
+    res = run_map_servo_joints(backend, robot=robot, ids=id_list, delta_units=delta_units,
+                               speed=speed, log=_echo)
+    backend.close()
+    if not res["ok"]:
+        _err(res["refusal"])
+        raise typer.Exit(1)
+    _ok(f"Saved joint map -> {res['path']}")
+    _echo("Now `real-image-ghost-fold` can build a joint-space ghost (above the table).")
+
+
+@app.command("real-image-ghost-fold")
+def real_image_ghost_fold_cmd(
+    image: str = typer.Option(..., help="Photo of the towel."),
+    robot: str = typer.Option(..., help="Robot config name."),
+    port: str = typer.Option(None, help="Serial port (defaults to the config's)."),
+    height_clearance_m: float = typer.Option(0.10, help="Min height above the table (>=0.10)."),
+    speed: str = typer.Option("very_slow"),
+    calibration: Optional[str] = typer.Option(None, help="Homography calibration JSON (for table-space)."),
+    task: str = typer.Option("configs/task_fold_towel_half.yaml"),
+    mode: str = typer.Option("model", help="Perception: model (classical fallback) | markers | claude."),
+    dry_run: bool = typer.Option(True, "--dry-run/--no-dry-run"),
+    enable_motion: bool = typer.Option(False, "--enable-motion"),
+    acknowledge: bool = typer.Option(False, "--i-understand-this-moves-hardware"),
+):
+    """Image -> plan -> GHOST fold above the table on the real arm. Default dry-run."""
+    from terafold.robot.real_image_ghost import run_real_image_ghost_fold
+
+    res = run_real_image_ghost_fold(
+        image, robot=robot, port=port, height_clearance_m=height_clearance_m, speed=speed,
+        calibration=calibration, task_path=task, mode=mode,
+        enable_motion=enable_motion, acknowledge=acknowledge, log=_echo,
+    )
+    _echo(f"  log -> {res.get('log')}")
+    if res["status"] == "refused":
+        _err(res.get("refusal", "refused"))
+        raise typer.Exit(1)
+    if res["status"] == "moved":
+        _ok(f"Ghost sweep complete ({res['motor_commands_sent']} commands). Arm stayed above the table.")
+    elif res["status"] == "dry_run":
+        _ok("DRY-RUN complete (nothing moved).")
 
 
 @app.command("export-trajectory")
