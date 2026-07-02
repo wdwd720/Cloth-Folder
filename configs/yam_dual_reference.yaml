@@ -1,0 +1,101 @@
+# TeraFold — dual I2RT YAM Standard + MolmoAct2 reference config.
+#
+# This file is the single source of truth for the YAM/MolmoAct2 stack:
+# camera order, normalization tag, safety limits, and asset paths.
+#
+# SAFETY — READ BEFORE EDITING:
+#   * Real execution is FORBIDDEN by default. `autonomous_execution_enabled`
+#     must stay `false`; `terafold.yam.config.load_yam_config` refuses to load
+#     a config that flips it, and no code in this sprint can command hardware
+#     even if it is flipped (see terafold/yam/safety.py).
+#   * This sprint is shadow mode only: cameras, state logging, teleop demos,
+#     and offline policy prediction. No commands are ever sent to the YAMs.
+#   * Any FUTURE real-hardware command must additionally require the explicit
+#     dangerous flags --enable-yam-motion and --i-understand-this-moves-the-yam
+#     (mirroring the old-arm double gate), which do nothing in this sprint.
+
+robot: dual_yam_standard
+arms: [left_yam, right_yam]
+
+# The order MolmoAct2-BimanualYAM expects its image inputs in. Do not reorder.
+camera_order: [top, left, right]
+
+# Normalization statistics tag used by the MolmoAct2 checkpoint for this embodiment.
+norm_tag: yam_dual_molmoact2
+
+action_mode: continuous
+control_mode: absolute_joint_pose
+
+# ---------------------------------------------------------------------------
+# Safety limits (used by terafold/yam/safety.py clamps)
+# ---------------------------------------------------------------------------
+autonomous_execution_enabled: false
+safe_speed_scale: 0.10
+
+# PLACEHOLDER: max per-step joint change (rad). Verify against I2RT YAM specs
+# and tighten before any future execution sprint.
+max_joint_delta_rad: 0.05
+
+# PLACEHOLDER: max per-step gripper change (normalized 0..1 units).
+max_gripper_delta: 0.10
+
+# PLACEHOLDER: reachable/allowed workspace in the shared table frame (meters).
+# Measure on the real rig before trusting these numbers.
+workspace_bounds:
+  x: [0.10, 0.80]
+  y: [-0.50, 0.50]
+  z: [0.01, 0.60]
+
+# PLACEHOLDER: table dimensions (meters). Measure the real table.
+table:
+  width_m: 1.20
+  depth_m: 0.80
+  height_m: 0.75
+
+# PLACEHOLDER: YAM kinematic structure. Confirm against the I2RT repo/URDF
+# before relying on shapes (action_dim = arms * (joints_per_arm + grippers_per_arm)).
+joints_per_arm: 6
+grippers_per_arm: 1
+
+# ---------------------------------------------------------------------------
+# Cameras (top, left, right) — intrinsics and device paths are PLACEHOLDERS.
+# Fill in from calibration / `v4l2-ctl --list-devices` / RealSense serials.
+# ---------------------------------------------------------------------------
+cameras:
+  top:
+    path: null            # e.g. /dev/video0 or a RealSense serial
+    width: 640
+    height: 480
+    intrinsics: {fx: null, fy: null, cx: null, cy: null}
+  left:
+    path: null
+    width: 640
+    height: 480
+    intrinsics: {fx: null, fy: null, cx: null, cy: null}
+  right:
+    path: null
+    width: 640
+    height: 480
+    intrinsics: {fx: null, fy: null, cx: null, cy: null}
+
+# ---------------------------------------------------------------------------
+# Asset paths — leave null until cloned/downloaded; `terafold yam-check-assets`
+# prints the exact commands for anything missing.
+# ---------------------------------------------------------------------------
+paths:
+  i2rt_repo: null           # e.g. ~/i2rt  (git clone https://github.com/i2rt-robotics/i2rt.git)
+  molmoact2_checkpoint: null  # local snapshot dir of the HF model (optional; HF cache also works)
+  urdf: null                # dual-YAM URDF (usually inside the I2RT repo)
+  usd: null                 # YAM USD asset for Isaac Sim (optional; placeholder arms otherwise)
+  mjcf: null                # MuJoCo MJCF for the future digital twin (optional this sprint)
+
+model:
+  name: allenai/MolmoAct2-BimanualYAM
+  dtype: bfloat16           # bfloat16 on GPU; float32 for CPU debugging
+
+notes: |
+  Shadow-mode-only reference config for the dual-YAM MolmoAct2 stack.
+  Real execution is forbidden by default: autonomous_execution_enabled must
+  stay false, and this sprint contains no code path that writes to YAM
+  hardware. Tomorrow's real-rig session is for asset checks, camera/state
+  logging, teleop demo collection, and offline shadow policy ONLY.
