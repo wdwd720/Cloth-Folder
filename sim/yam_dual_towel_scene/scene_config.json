@@ -1,0 +1,111 @@
+{
+  "scene": "yam_dual_towel_scene",
+  "robot": "dual_yam_standard",
+  "arms": [
+    "left_yam",
+    "right_yam"
+  ],
+  "arm_bases": {
+    "left_yam": [
+      -0.48,
+      -0.35,
+      0.75
+    ],
+    "right_yam": [
+      -0.48,
+      0.35,
+      0.75
+    ]
+  },
+  "camera_order": [
+    "top",
+    "left",
+    "right"
+  ],
+  "cameras": {
+    "top": {
+      "position": [
+        0.0,
+        0.0,
+        1.6
+      ],
+      "rotation_xyz_deg": [
+        0.0,
+        0.0,
+        0.0
+      ],
+      "role": "overhead"
+    },
+    "left": {
+      "position": [
+        0.15,
+        -0.35,
+        1.1
+      ],
+      "rotation_xyz_deg": [
+        55.0,
+        0.0,
+        25.0
+      ],
+      "role": "left wrist placeholder (rigid until URDF attach)"
+    },
+    "right": {
+      "position": [
+        0.15,
+        0.35,
+        1.1
+      ],
+      "rotation_xyz_deg": [
+        -55.0,
+        0.0,
+        -25.0
+      ],
+      "role": "right wrist placeholder (rigid until URDF attach)"
+    }
+  },
+  "norm_tag": "yam_dual_molmoact2",
+  "table": {
+    "width_m": 1.2,
+    "depth_m": 0.8,
+    "height_m": 0.75
+  },
+  "towel": {
+    "width_m": 0.4,
+    "depth_m": 0.3,
+    "thickness_m": 0.006,
+    "center_xy": [
+      0.1,
+      0.0
+    ],
+    "yaw_deg": 0.0,
+    "color_rgb": [
+      0.16,
+      0.42,
+      0.8
+    ],
+    "note": "rigid placeholder; deformable cloth comes in a later sprint"
+  },
+  "workspace_bounds": {
+    "x": [
+      0.1,
+      0.8
+    ],
+    "y": [
+      -0.5,
+      0.5
+    ],
+    "z": [
+      0.01,
+      0.6
+    ]
+  },
+  "paths": {
+    "urdf": null,
+    "usd": null
+  },
+  "usd_filename": "yam_dual_towel_scene.usd",
+  "simulation_only": true,
+  "hardware_commanded": false,
+  "generated_from": "configs/yam_dual_reference.yaml",
+  "generated_at": "2026-07-02T04:17:47.618763+00:00"
+}
