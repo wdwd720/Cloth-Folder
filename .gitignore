@@ -18,20 +18,17 @@ venv/
 env/
 
 # TeraFold runtime artifacts (large / regenerable — never commit)
-data/synth_v0/
-data/synth*/
-data/episodes/
-data/lerobot/
-data/calib/
-data/fold_pairs/
-data/public_samples/
-data/public/
-data/cache/
+# /data holds raw/generated datasets (GBs); GitHub caps files at 100 MB anyway.
+# (anchored to repo root so terafold/data — a Python package — stays tracked)
+/data/
 runs/
 *.pt
 *.ckpt
 *.safetensors
 *.mp4
+# Archive snapshots (the 424 MB / 1.4 GB dataset tarballs exceed GitHub's limit;
+# code tarballs duplicate what git already tracks)
+*.tar.gz
 
 # OS / editor
 .DS_Store

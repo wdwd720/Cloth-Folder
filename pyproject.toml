@@ -55,13 +55,45 @@ video = [
     "imageio>=2.31",
     "imageio-ffmpeg>=0.4",
 ]
-# Claude Vision keypoint labeling (--mode claude). Needs ANTHROPIC_API_KEY.
+# Claude Vision keypoint labeling (--mode claude) + towel pseudo-labeling
+# (claude-label-towel-folder). Needs ANTHROPIC_API_KEY (read only from env).
 claude = [
     "anthropic>=0.40",
+]
+# External real-image ingest for the towel pseudo-labeling pipeline
+# (import-kaggle-towel-dataset). Both clients are optional + lazily probed.
+kaggle = [
+    "kaggle>=1.6",
+    "kagglehub>=0.3",
+]
+# OpenAI image generation for the towel "realism bridge" layer
+# (generate-openai-towel-dataset). Lazy + optional; reads OPENAI_API_KEY from env.
+openai = [
+    "openai>=1.40",
 ]
 # Serial port discovery for robot-scan (richer metadata than device-node globbing).
 robot = [
     "pyserial>=3.5",
+]
+# MolmoAct2-BimanualYAM inference (yam-molmoact2-smoke-test / yam-shadow-policy).
+# Lazy + optional; the whole YAM shadow stack runs with --mock and none of these.
+molmoact = [
+    "torch>=2.1",
+    "transformers>=4.45",
+    "accelerate>=0.30",
+    "einops>=0.7",
+    "pillow>=10.0",
+]
+# Rerun visual logging for the YAM shadow stack (optional; JSON always saved).
+rerun = [
+    "rerun-sdk>=0.20",
+]
+# Towel corner-pose detection (YOLO pose). Optional: training/inference run via the
+# Ultralytics CLI/SDK. The dataset pipeline (create/label/merge/export) needs none of this.
+yolo = [
+    "ultralytics>=8.1",
+    "opencv-python>=4.8",
+    "pillow>=10.0",
 ]
 # Virtual SO-101 fold simulation (MuJoCo) + video rendering.
 sim = [

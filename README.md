@@ -76,6 +76,174 @@ feature source for the learners.
   protocol implementation. **Never** point an arm at a person; keep an
   e-stop / power cut within reach.
 
+## 5b. Physical 7-DOF arm — capability-gated platform
+
+The custom Waveshare bus-servo arm (`sms_sts` @ 1,000,000 baud, IDs 1,2,5,6) is a
+first-class, **safety-gated** target. A single source of truth answers "am I safe to
+proceed?" and an 8-level unlock ladder governs every physical action.
+
+```bash
+# The "am I safe?" check — offline, then with a read-only serial probe:
+python3 -m terafold robot-status --robot physical_7dof_waveshare
+python3 -m terafold robot-status --robot physical_7dof_waveshare --probe
+
+# Kinematic-model honesty (custom arm is UNVALIDATED → IK/contact refused):
+python3 -m terafold robot-model-status --robot physical_7dof_waveshare
+```
+
+`robot-status` prints the unlocked **Level** (0–8) and, for every higher level, the
+exact missing artifact. The ladder: 0 sim → 1 read-only → 2 tiny-nudge → 3 joint-map
+→ 4 above-table ghost fold → 5 calibrated hover → 6 soft contact → 7 constrained fold
+→ 8 repeated autonomy. **Today the system reaches Level 4** (a real above-table ghost
+fold); Levels 5–8 are scaffolded and *refuse* with a clear reason. **Contact folding
+is locked** behind the full calibration chain plus an explicit operator unlock.
+
+New capability/calibration/data/eval/sim commands:
+
+```bash
+# Read-only servo scan (JSON + Markdown; never writes a servo):
+python3 -m terafold servo-scan --robot physical_7dof_waveshare --ids 1-30 --read-only
+
+# Servo characterization (deadband/backlash/repeatability) — DRY-RUN default:
+python3 -m terafold characterize-servos --robot physical_7dof_waveshare --ids 1,2,5,6 \
+  --out runs/servo_characterization/session_001 --dry-run
+
+# Calibration chain (homography is pure-numpy; intrinsics use OpenCV if present):
+python3 -m terafold calibrate-table --points-image "u1,v1;..." --points-table "0,0;..." \
+  --robot physical_7dof_waveshare
+python3 -m terafold validate-table-calibration --calibration <yaml> --points-image ... --points-table ...
+python3 -m terafold calibrate-camera --images 'data/cal/*.png' --robot physical_7dof_waveshare
+python3 -m terafold robot-touch-calibration --robot physical_7dof_waveshare --dry-run
+python3 -m terafold fit-robot-table-transform --touch-points <json> --robot physical_7dof_waveshare
+
+# Data + eval + sim preview:
+python3 -m terafold episode-summary --episode runs/real_motion_logs/<session>.jsonl
+python3 -m terafold export-lerobot-logs --logs runs/real_motion_logs --out data/lerobot/terafold_custom_arm_v0
+python3 -m terafold eval-run --logs runs/real_motion_logs/<session>.jsonl --out runs/eval/report.md
+python3 -m terafold sim-real-ghost-fold --plan-json runs/plan.json --joint-map physical_7dof_waveshare
+```
+
+Operator guides: [`docs/REAL_HARDWARE_SAFETY.md`](docs/REAL_HARDWARE_SAFETY.md),
+[`docs/CUSTOM_ARM_BRINGUP.md`](docs/CUSTOM_ARM_BRINGUP.md),
+[`docs/CALIBRATION_WORKFLOW.md`](docs/CALIBRATION_WORKFLOW.md),
+[`docs/DATA_AND_LEROBOT.md`](docs/DATA_AND_LEROBOT.md),
+[`docs/NEXT_90_DAYS.md`](docs/NEXT_90_DAYS.md), and the strategy digest
+[`docs/DEEP_RESEARCH_DIGEST.md`](docs/DEEP_RESEARCH_DIGEST.md).
+
+## 5c. Real-image-first towel learning pipeline (perception/planning)
+
+A towel-only **perception + planning** layer. Real images are the **default**
+training data; synthetic is optional augmentation only. This trains a towel
+**corner-pose** detector (YOLO pose, 4 corners) + a rule-based **fold-plan critic**
+— **no** action policy, **no** ACT/Diffusion, **no** contact unlock, **no** hardware.
+
+```bash
+# 1. Build a dataset from YOUR phone/webcam towel photos (copies + label templates):
+python3 -m terafold create-towel-real-dataset --images data/raw_towel_images --out data/towel_real_v0
+
+# 2. Label corners (tl, tr, br, bl) — clicks if OpenCV GUI, else terminal coords:
+python3 -m terafold label-towel-folder --dataset data/towel_real_v0
+
+# 3. (optional) import an external export you downloaded legally; or synthetic aug:
+python3 -m terafold import-towel-web-dataset --source folder --src-dir ~/Downloads/roboflow_towel --out data/towel_external_v0
+python3 -m terafold generate-towel-dataset --num 1000 --out data/towel_synth_v0      # augmentation only
+
+# 4. Merge (dedup + train/val/test), real-only optional, then export YOLO pose:
+python3 -m terafold merge-towel-datasets --inputs data/towel_real_v0,data/towel_external_v0,data/towel_synth_v0 --out data/towel_combined_v0
+python3 -m terafold export-yolo-towel-pose --data data/towel_combined_v0 --out data/yolo_towel_pose_v0
+
+# 5. Print the training command (local or RunPod), then run inference/eval:
+python3 -m terafold print-towel-training-command --data data/yolo_towel_pose_v0 --model yolo26n-pose.pt --epochs 100 --imgsz 640
+python3 -m terafold infer-towel-pose --image ~/Downloads/hotel_towel_test.jpg --weights runs/towel_pose/yolo_towel_pose_v0/weights/best.pt --out runs/towel_pose/test_result.json --overlay-out runs/towel_pose/test_overlay.png
+python3 -m terafold evaluate-towel-pose --data data/towel_combined_v0 --weights runs/towel_pose/yolo_towel_pose_v0/weights/best.pt --out runs/towel_pose/eval_v0
+
+# 6. Fold-plan critic (rule-based now; trainable scaffold):
+python3 -m terafold build-plan-critic-dataset --data data/towel_combined_v0 --out data/plan_critic_v0
+python3 -m terafold train-plan-critic --data data/plan_critic_v0 --out runs/plan_critic_v0
+python3 -m terafold eval-plan-critic --data data/plan_critic_v0 --model runs/plan_critic_v0/model.pt --out runs/plan_critic_v0/eval.md
+
+# 7. DRY-RUN the trained detector + critic through the safety-gated ghost fold:
+python3 -m terafold real-image-ghost-fold --image ~/Downloads/hotel_towel_test.jpg \
+  --robot physical_7dof_waveshare --perception-backend yolo_towel_pose \
+  --weights runs/towel_pose/yolo_towel_pose_v0/weights/best.pt \
+  --min-perception-confidence 0.75 --min-plan-score 0.65 --dry-run
+```
+
+YOLO inference/training needs `pip install -e ".[yolo]"` (Ultralytics); the
+dataset pipeline (create/label/merge/export/critic) needs none of it. Contact
+folding stays LOCKED; the YOLO backend is dry-run perception only and never moves
+hardware.
+
+## 5d. External images + Claude pseudo-labeling (scale the dataset)
+
+Grow the towel set with **external real images** (Kaggle / Open Images) and
+**pseudo-label** them with Claude Vision — keeping a human in the loop. Pseudo-labels
+are never trusted by default: they start `usable_for_training: false` and the YOLO
+exporter excludes them unless approved. Full guide + cost/privacy warnings:
+[`docs/TOWEL_PSEUDOLABELING.md`](docs/TOWEL_PSEUDOLABELING.md).
+
+```bash
+# Ingest external real images (Kaggle shown; Open Images is a manual download path):
+python3 -m terafold import-kaggle-towel-dataset --dataset owner/dataset-slug --out data/towel_kaggle_raw_v0 --max-images 2000
+
+# Cheap pre-filter, then pseudo-label with Claude (needs ANTHROPIC_API_KEY; key never printed):
+python3 -m terafold filter-towel-images --input data/towel_kaggle_raw_v0 --out data/towel_candidates_v0 --mode filename_or_vlm
+export ANTHROPIC_API_KEY=...
+python3 -m terafold claude-label-towel-folder --input data/towel_candidates_v0 --out data/towel_pseudolabeled_v0 --max-images 500 --min-confidence 0.75 --resume
+
+# Review (or auto-approve high-confidence), then export ONLY approved pseudo-labels:
+python3 -m terafold review-pseudolabels --dataset data/towel_pseudolabeled_v0
+python3 -m terafold approve-high-confidence-pseudolabels --dataset data/towel_pseudolabeled_v0 --min-confidence 0.90 --max-geometry-error 0.10
+python3 -m terafold merge-towel-datasets --inputs data/towel_real_v0,data/towel_pseudolabeled_v0 --out data/towel_combined_v1
+python3 -m terafold export-yolo-towel-pose --data data/towel_combined_v1 --out data/yolo_towel_pose_v1 --include-pseudolabels approved_only
+```
+
+Claude is asked for image **geometry only** (never robot commands); the hardware
+safety gates and contact-fold lock are untouched.
+
+## 5e. OpenAI-generated images — the realism bridge (Layer B)
+
+Generate **photorealistic hotel-towel images** as a middle layer between synthetic
+(Layer A) and real (Layer C) data, then QC → pseudo-label → **auto-triage** →
+review → merge into the same training flow. Generated images are a *bridge*, **not**
+ground truth: they start `usable_for_training: false` and only export once approved.
+Full guide + cost/privacy warnings + RunPod handoff:
+[`docs/TOWEL_OPENAI_GENERATION.md`](docs/TOWEL_OPENAI_GENERATION.md).
+
+Generation is split into two **tracks**: `pose_positive` (single flat towels, the
+only YOLO pose data — strict tasks `pose_positive_flat_only` /
+`pose_positive_diverse_v1` with hard-constraint prompts) and `critic_negative`
+(folded/multiple/hanging — `critic_negatives_v1`, for a future scene critic, never
+pose-exported by default).
+
+```bash
+pip install -e ".[openai]"            # lazy/optional SDK; reads OPENAI_API_KEY from env
+
+# Preview the strict pose curriculum (free), then dry-run the cost (no API call):
+python3 -m terafold preview-openai-towel-prompts --task pose_positive_flat_only --num 20
+python3 -m terafold generate-openai-towel-dataset --out data/towel_openai_pose_v0 --num-images 100 \
+  --task pose_positive_flat_only --model gpt-image-1 --size 1024 --dry-run
+
+# Real, budget-capped generation (paid; ~$4–8 for 100 @ gpt-image-1 medium):
+python3 -m terafold generate-openai-towel-dataset --out data/towel_openai_pose_v0 --num-images 100 \
+  --task pose_positive_flat_only --model gpt-image-1 --size 1024 \
+  --max-cost-usd 8 --no-dry-run --yes-i-understand-this-uses-paid-api
+
+# QC, pseudo-label, AUTO-TRIAGE, review only leftovers, then merge/export/train:
+python3 -m terafold filter-generated-towel-images --input data/towel_openai_pose_v0 --out data/towel_openai_pose_qc_v0
+python3 -m terafold claude-label-towel-folder --input data/towel_openai_pose_qc_v0 --out data/towel_openai_pose_labeled_v0 --min-confidence 0.75
+python3 -m terafold auto-triage-pseudolabels --dataset data/towel_openai_pose_labeled_v0 --policy pose_positive_strict --apply
+python3 -m terafold review-pseudolabels --dataset data/towel_openai_pose_labeled_v0 --source openai_generated
+python3 -m terafold merge-towel-datasets --inputs data/towel_synth_640_v1,data/towel_openai_pose_labeled_v0 --out data/towel_master_pose_v0
+python3 -m terafold export-yolo-towel-pose --data data/towel_master_pose_v0 --out data/yolo_towel_pose_master_v0 --include-pseudolabels approved_only
+python3 -m terafold recommend-towel-training-plan --data data/yolo_towel_pose_master_v0
+```
+
+Cost-gated by default (dry-run preview + `--max-cost-usd` + an explicit
+acknowledgement flag); the OpenAI key is read only from `OPENAI_API_KEY` and never
+printed. Pose export excludes `critic_negative` and unapproved pseudo-labels. No
+hardware is touched and contact folding stays LOCKED.
+
 ## 6. Install
 
 ```bash

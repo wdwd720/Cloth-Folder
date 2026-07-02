@@ -561,6 +561,50 @@ def robot_info_template_cmd(
 # ----------------------------------------------------------------------
 
 
+@app.command("robot-status")
+def robot_status_cmd(
+    robot: str = typer.Option(..., help="Robot config name (e.g. physical_7dof_waveshare)."),
+    port: str = typer.Option("auto", help="Serial port, or 'auto' (use the config's)."),
+    probe: bool = typer.Option(
+        False, "--probe/--no-probe",
+        help="Open the port READ-ONLY and ping/read to confirm the protocol. Never moves."),
+    unlock_contact: bool = typer.Option(
+        False, "--unlock-contact", help="Operator contact-unlock flag (still gated)."),
+    out: Optional[str] = typer.Option(None, help="Also write the Markdown report here."),
+    save_json: Optional[str] = typer.Option(None, help="Also write the JSON snapshot here."),
+):
+    """Am-I-safe-to-proceed check: the robot's capabilities + unlocked safety level.
+
+    Read-only and offline by default (no serial access). Add ``--probe`` to confirm
+    the protocol with a read-only ping/read. Prints the unlock ladder with the exact
+    reason each higher level is blocked.
+    """
+    from terafold.robot.capabilities import probe_capabilities
+
+    caps = probe_capabilities(
+        robot, port=None if port == "auto" else port, do_probe=probe,
+        contact_unlock=unlock_contact,
+    )
+    from terafold.robot.safety_state import SafetyLevel
+
+    _echo(caps.report_markdown())
+    _echo("")
+    suffix = "" if caps.contact_allowed else "  (contact folding LOCKED)"
+    _ok(f"Unlocked: {SafetyLevel(caps.unlocked_level).label}{suffix}")
+    if out:
+        import os as _os
+
+        _os.makedirs(_os.path.dirname(_os.path.abspath(out)) or ".", exist_ok=True)
+        with open(out, "w") as f:
+            f.write(caps.report_markdown())
+        _ok(f"Wrote report -> {out}")
+    if save_json:
+        from terafold.data.episode_schema import write_json
+
+        write_json(save_json, caps.to_dict())
+        _ok(f"Wrote snapshot -> {save_json}")
+
+
 def _load_arm(robot: str, port: str):
     from terafold.robot.arm_config import load_arm_config
     from terafold.robot.waveshare_bus_servo import WaveshareBusServoAdapter
@@ -609,19 +653,36 @@ def robot_probe_cmd(
 def servo_scan_cmd(
     robot: str = typer.Option(..., help="Robot config name."),
     port: str = typer.Option("auto", help="Serial port, or 'auto'."),
-    read_only: bool = typer.Option(True, "--read-only/--no-read-only", help="Read-only (default)."),
+    ids: str = typer.Option("", help="ID range/list, e.g. '1-30' (overrides --id-min/--id-max)."),
     id_min: int = typer.Option(1), id_max: int = typer.Option(30),
+    read_only: bool = typer.Option(True, "--read-only/--no-read-only",
+                                   help="Always read-only; this flag is informational."),
+    out: Optional[str] = typer.Option(None, help="Scan output dir (default runs/servo_scan/<ts>)."),
 ):
-    """Discover servo IDs — only if the protocol is confirmed; otherwise refuses."""
-    cfg, adapter = _load_arm(robot, port)
-    res = adapter.scan_servo_ids(id_min, id_max)
-    if not res.get("supported"):
-        _err(res["reason"])
-        _echo("Next steps:")
-        for s in res.get("next_steps", []):
-            _echo(f"  - {s}")
+    """Read-only servo-ID scan: ping + read each ID, write scan.json + summary.md.
+
+    NEVER writes a servo. Refuses (non-zero) if the protocol cannot be confirmed.
+    """
+    from terafold.robot.servo_scan import parse_id_range, run_servo_scan
+
+    if ids.strip():
+        rng = parse_id_range(ids)
+        if rng:
+            id_min, id_max = min(rng), max(rng)
+    res = run_servo_scan(robot, port=None if port == "auto" else port,
+                         id_min=id_min, id_max=id_max, out_dir=out)
+    if not res.get("protocol_confirmed"):
+        _err("protocol not confirmed: no ping/read on the bus. Check power (DC 9-12.6V), "
+             "the USB-C cable, the port, and that pyserial + the vendor scservo_sdk are installed.")
+        _echo(f"  (read-only scan still written -> {res['scan_json']})")
         raise typer.Exit(1)
-    _ok(f"Found servo IDs: {res['servo_ids']}")
+    _ok(f"Found servo IDs: {res['found_ids']}  (missing expected: {res['missing_ids']})")
+    _echo(f"  scan    : {res['scan_json']}")
+    _echo(f"  summary : {res['summary_md']}")
+    if res["missing_ids"]:
+        _echo("  Missing IDs — physical debugging:")
+        for s in res.get("missing_id_debug", []):
+            _echo(f"    - {s}")
 
 
 @app.command("servo-nudge")
@@ -908,19 +969,38 @@ def real_image_ghost_fold_cmd(
     calibration: Optional[str] = typer.Option(None, help="Homography calibration JSON (for table-space)."),
     task: str = typer.Option("configs/task_fold_towel_half.yaml"),
     mode: str = typer.Option("model", help="Perception: model (classical fallback) | markers | claude."),
+    perception_backend: str = typer.Option(
+        "classical", help="classical | yolo_towel_pose (trained towel corner-pose, dry-run only)."),
+    weights: Optional[str] = typer.Option(None, help="YOLO towel-pose weights (perception-backend yolo_towel_pose)."),
+    plan_critic: Optional[str] = typer.Option(None, help="Plan-critic model (optional; rule-based by default)."),
+    min_perception_confidence: float = typer.Option(0.75, help="Refuse below this avg keypoint confidence."),
+    min_plan_score: float = typer.Option(0.65, help="Refuse below this critic plan score."),
     dry_run: bool = typer.Option(True, "--dry-run/--no-dry-run"),
     enable_motion: bool = typer.Option(False, "--enable-motion"),
     acknowledge: bool = typer.Option(False, "--i-understand-this-moves-hardware"),
 ):
-    """Image -> plan -> GHOST fold above the table on the real arm. Default dry-run."""
+    """Image -> plan -> GHOST fold above the table on the real arm. Default dry-run.
+
+    With ``--perception-backend yolo_towel_pose`` the trained towel corner detector +
+    rule-based plan critic run in DRY-RUN: corners, confidence, towel state, fold
+    direction, grasp/place, plan score, risk reasons, and the allowed_for_* flags are
+    printed; low-confidence / bad-view / multiple-towel / not-towel / already-folded
+    cases are refused. Contact folding stays LOCKED and no hardware command is sent.
+    """
     from terafold.robot.real_image_ghost import run_real_image_ghost_fold
 
     res = run_real_image_ghost_fold(
         image, robot=robot, port=port, height_clearance_m=height_clearance_m, speed=speed,
         calibration=calibration, task_path=task, mode=mode,
+        perception_backend=perception_backend, weights=weights, plan_critic=plan_critic,
+        min_perception_confidence=min_perception_confidence, min_plan_score=min_plan_score,
         enable_motion=enable_motion, acknowledge=acknowledge, log=_echo,
     )
     _echo(f"  log -> {res.get('log')}")
+    if perception_backend == "yolo_towel_pose":
+        _echo(f"  allowed_for_dry_run={res.get('allowed_for_dry_run')}  "
+              f"allowed_for_real_ghost={res.get('allowed_for_real_ghost')}  "
+              f"allowed_for_contact={res.get('allowed_for_contact')}")
     if res["status"] == "refused":
         _err(res.get("refusal", "refused"))
         raise typer.Exit(1)
@@ -1444,6 +1524,1210 @@ def sim_fold_cmd(
         _echo(f"  frames[{v}]: {d}")
     _echo(f"  meta  : {res.get('meta_json')}")
     _echo(f"  {res.get('note')}")
+
+
+# --------------------------------------------------------------------------
+# Kinematics model status
+# --------------------------------------------------------------------------
+
+
+@app.command("robot-model-status")
+def robot_model_status_cmd(
+    robot: str = typer.Option(..., help="Robot config name."),
+    save_json: Optional[str] = typer.Option(None, help="Also write the JSON status here."),
+):
+    """Kinematic-model status: joint map, raw→angle, FK/IK, contact posture.
+
+    For the custom arm this reports the model as UNVALIDATED — autonomous Cartesian
+    IK and contact stay refused until a validated model exists.
+    """
+    from terafold.kinematics.model_status import report_markdown, robot_model_status
+
+    status = robot_model_status(robot)
+    _echo(report_markdown(status))
+    if save_json:
+        from terafold.data.episode_schema import write_json
+
+        write_json(save_json, status)
+        _ok(f"Wrote status -> {save_json}")
+
+
+# --------------------------------------------------------------------------
+# Servo characterization (deadband / backlash / repeatability)
+# --------------------------------------------------------------------------
+
+
+@app.command("characterize-servos")
+def characterize_servos_cmd(
+    robot: str = typer.Option(..., help="Robot config name."),
+    ids: str = typer.Option(..., help="Comma/range IDs, e.g. 1,2,5,6 or 1-6."),
+    out: str = typer.Option("runs/servo_characterization/session_001"),
+    port: str = typer.Option("auto"),
+    dry_run: bool = typer.Option(True, "--dry-run/--no-dry-run"),
+    enable_motion: bool = typer.Option(False, "--enable-motion"),
+    acknowledge: bool = typer.Option(False, "--i-understand-this-moves-hardware"),
+):
+    """Characterize servos (readback noise/deadband/backlash/step/repeatability).
+
+    Default DRY-RUN prints the plan and moves nothing. Real mode needs BOTH motion
+    flags AND a confirmed protocol (refuses otherwise).
+    """
+    from terafold.robot.characterization import run_characterization
+    from terafold.robot.servo_scan import parse_id_range
+
+    id_list = parse_id_range(ids)
+    res = run_characterization(
+        robot, ids=id_list, out=out, port=None if port == "auto" else port,
+        dry_run=dry_run, enable_motion=enable_motion, acknowledge=acknowledge, log=_echo,
+    )
+    status = res.get("status")
+    if status == "dry_run":
+        _ok(f"DRY-RUN: nothing moved. Plan for IDs {id_list} written under {res.get('out')}.")
+    elif status == "refused":
+        _err(res.get("reason", res.get("refusal", "refused")))
+        raise typer.Exit(1)
+    elif status == "ok":
+        _ok(f"Characterized {id_list}. metrics -> {res.get('metrics_json')}")
+        if res.get("summary_md"):
+            _echo(f"  summary : {res['summary_md']}")
+    else:
+        _echo(str(res))
+
+
+# --------------------------------------------------------------------------
+# Calibration: table homography, validation, camera intrinsics, robot↔table
+# --------------------------------------------------------------------------
+
+
+def _xy_pairs(spec: str):
+    from terafold.camera.table_calibration import parse_xy_list
+
+    return parse_xy_list(spec)
+
+
+def _default_cal_out(robot: Optional[str], name: str, override: Optional[str]) -> str:
+    if override:
+        return override
+    if robot:
+        from terafold.robot.capabilities import artifact_paths
+
+        return artifact_paths(robot).get(name, f"runs/calibration/{name}.yaml")
+    return f"runs/calibration/{name}.yaml"
+
+
+@app.command("calibrate-table")
+def calibrate_table_cmd(
+    points_image: str = typer.Option(..., help="4+ pixel pts 'u1,v1;u2,v2;...'."),
+    points_table: str = typer.Option(..., help="4+ table metres 'x1,y1;x2,y2;...'."),
+    robot: Optional[str] = typer.Option(None, help="Robot (defaults --out to its discoverable path)."),
+    image: Optional[str] = typer.Option(None, help="Calibration image (reference only)."),
+    out: Optional[str] = typer.Option(None, help="Output YAML (default runs/calibration/<robot>_table_homography.yaml)."),
+    operator: str = typer.Option(""),
+):
+    """Solve + save the image→table homography (pure numpy) with validity flags."""
+    import time as _time
+
+    from terafold.calibration.table_homography import calibrate_table
+
+    dest = _default_cal_out(robot, "table_homography", out)
+    try:
+        res = calibrate_table(_xy_pairs(points_image), _xy_pairs(points_table), dest,
+                              image=image, operator=operator, timestamp=_time.time())
+    except Exception as exc:
+        _err(f"Calibration failed: {exc}")
+        raise typer.Exit(1)
+    _ok(f"Saved homography -> {res['out']}  (rms {res['rms_error_m']:.4f} m, "
+        f"max {res['max_error_m']:.4f} m)")
+    _echo(f"  valid_for_hover={res['valid_for_hover']}  valid_for_contact={res['valid_for_contact']}")
+
+
+@app.command("validate-table-calibration")
+def validate_table_calibration_cmd(
+    calibration: str = typer.Option(..., help="Homography YAML from calibrate-table."),
+    points_image: str = typer.Option(..., help="Held-out pixel pts 'u,v;...'."),
+    points_table: str = typer.Option(..., help="Held-out table metres 'x,y;...'."),
+):
+    """Validate a saved homography against held-out correspondences."""
+    from terafold.calibration.validation import validate_table_calibration
+
+    res = validate_table_calibration(calibration, _xy_pairs(points_image), _xy_pairs(points_table))
+    _echo(f"held-out rms {res['rms_error_m']:.4f} m  max {res['max_error_m']:.4f} m")
+    _echo(f"valid_for_hover={res['valid_for_hover']}  valid_for_contact={res['valid_for_contact']}")
+    if not res["valid_for_hover"]:
+        _err("Calibration does NOT meet the hover gate — hover/contact stay locked.")
+        raise typer.Exit(1)
+    _ok("Calibration valid for hover.")
+
+
+@app.command("calibrate-camera")
+def calibrate_camera_cmd(
+    images: str = typer.Option(..., help="Glob of checkerboard images, e.g. 'data/cal/*.png'."),
+    robot: Optional[str] = typer.Option(None, help="Robot (defaults --out path)."),
+    out: Optional[str] = typer.Option(None, help="Output YAML."),
+    board: str = typer.Option("9,6", help="Inner corners 'cols,rows'."),
+    square_m: float = typer.Option(0.025, help="Square size (m)."),
+):
+    """Estimate camera intrinsics from checkerboard images (OpenCV optional)."""
+    from terafold.calibration.camera_intrinsics import calibrate_camera
+
+    dest = _default_cal_out(robot, "camera_intrinsics", out)
+    cols, rows = (int(x) for x in board.split(","))
+    res = calibrate_camera(images, dest, board=(cols, rows), square_m=square_m)
+    if res.get("status") != "ok":
+        _err(res.get("reason", "camera calibration unavailable"))
+        if res.get("install"):
+            _err(f"Run:  {res['install']}")
+        raise typer.Exit(1)
+    _ok(f"Saved intrinsics -> {res['out']}  (rms {res['rms_px']:.3f} px, "
+        f"valid_for_hover={res['valid_for_hover']})")
+
+
+@app.command("robot-touch-calibration")
+def robot_touch_calibration_cmd(
+    robot: str = typer.Option(..., help="Robot config name."),
+    joint_map: Optional[str] = typer.Option(None, help="Joint map YAML."),
+    out: str = typer.Option("runs/calibration/robot_table_touch_points.json"),
+    points_json: Optional[str] = typer.Option(None, help="A JSON of recorded {table_xy,robot_xyz} pairs to save."),
+    dry_run: bool = typer.Option(True, "--dry-run/--no-dry-run"),
+    enable_motion: bool = typer.Option(False, "--enable-motion"),
+    acknowledge: bool = typer.Option(False, "--i-understand-this-moves-hardware"),
+):
+    """Plan/record manual table↔robot touch points (dry-run default; never auto-drives)."""
+    from terafold.calibration.robot_table_transform import robot_touch_calibration
+    from terafold.data.episode_schema import read_json
+
+    points = None
+    if points_json:
+        d = read_json(points_json)
+        points = d.get("points", d) if isinstance(d, dict) else d
+    res = robot_touch_calibration(robot, joint_map=joint_map, out=out, dry_run=dry_run,
+                                  enable_motion=enable_motion, acknowledge=acknowledge, points=points)
+    status = res.get("status")
+    if status == "saved":
+        _ok(f"Saved {len(points or [])} touch points -> {res['out']}")
+    elif status == "refused":
+        _err(res.get("reason", "refused"))
+        raise typer.Exit(1)
+    else:
+        _echo(f"[{status}] Manual touch-calibration plan (moves_hardware={res.get('moves_hardware')}):")
+        for step in (res.get("procedure") or res.get("plan") or []):
+            _echo(f"  - {step}")
+        _echo(f"Output format: {res.get('output_format', 'JSON {points:[{table_xy,robot_xyz}]}')}")
+        _echo("Record pairs then re-run with --points-json to save, or "
+              "`fit-robot-table-transform` once you have >=3 points.")
+
+
+@app.command("fit-robot-table-transform")
+def fit_robot_table_transform_cmd(
+    touch_points: str = typer.Option(..., help="Touch-points JSON (>=3 {table_xy,robot_xyz})."),
+    robot: Optional[str] = typer.Option(None, help="Robot (defaults --out path)."),
+    out: Optional[str] = typer.Option(None, help="Output YAML."),
+):
+    """Fit + save the robot↔table rigid transform (Kabsch/Umeyama) with validity flags."""
+    import time as _time
+
+    from terafold.calibration.robot_table_transform import fit_robot_table_transform
+
+    dest = _default_cal_out(robot, "robot_table_transform", out)
+    try:
+        res = fit_robot_table_transform(touch_points, dest, timestamp=_time.time())
+    except Exception as exc:
+        _err(f"Fit failed: {exc}")
+        raise typer.Exit(1)
+    _ok(f"Saved robot↔table transform -> {res['out']}  (rms {res['rms_error_m']:.4f} m)")
+    _echo(f"  valid_for_hover={res['valid_for_hover']}  valid_for_contact={res['valid_for_contact']}")
+
+
+# --------------------------------------------------------------------------
+# Data: episode summary + LeRobot export from motion logs
+# --------------------------------------------------------------------------
+
+
+@app.command("episode-summary")
+def episode_summary_cmd(
+    episode: str = typer.Option(..., help="A motion-log JSONL, episode dir, or episode JSON."),
+):
+    """Summarize an episode / motion-log (frames, task, robot, dry-run, writes)."""
+    from terafold.data.summary import summary_markdown
+
+    _echo(summary_markdown(episode))
+
+
+@app.command("export-lerobot-logs")
+def export_lerobot_logs_cmd(
+    logs: str = typer.Option(..., help="Dir of motion-log JSONL files and/or episode dirs."),
+    out: str = typer.Option(..., help="LeRobot dataset output dir."),
+    fps: int = typer.Option(10),
+    robot_type: str = typer.Option("custom_7dof_sms_sts"),
+):
+    """Export motion-log episodes to a LeRobot-compatible scaffold (no LeRobot needed)."""
+    from terafold.data.lerobot_export import export_episodes_to_lerobot
+
+    res = export_episodes_to_lerobot(logs, out, fps=fps, robot_type=robot_type)
+    _ok(f"Exported {res.get('episodes')} episodes / {res.get('frames')} frames -> {res.get('out')} "
+        f"({res.get('format')}, lerobot_installed={res.get('lerobot_installed')})")
+    if res.get("note"):
+        _echo(f"  note: {res['note']}")
+
+
+# --------------------------------------------------------------------------
+# Evaluation report
+# --------------------------------------------------------------------------
+
+
+@app.command("eval-run")
+def eval_run_cmd(
+    logs: str = typer.Option(..., help="A motion-log JSONL (or episode)."),
+    out: Optional[str] = typer.Option(None, help="Write the Markdown report here."),
+):
+    """Compute evaluation metrics from logs and write a Markdown report."""
+    from terafold.eval.report import eval_run
+
+    res = eval_run(logs, out=out)
+    if res.get("report_markdown"):
+        _echo(res["report_markdown"])
+    for w in res.get("warnings", []):
+        _err(f"warning: {w}")
+    if out:
+        _ok(f"Wrote eval report -> {out}")
+
+
+# --------------------------------------------------------------------------
+# Sim: image-driven above-table ghost-fold preview (simulation only)
+# --------------------------------------------------------------------------
+
+
+@app.command("sim-real-ghost-fold")
+def sim_real_ghost_fold_cmd(
+    plan_json: str = typer.Option(..., help="A FoldPlan / demo result JSON."),
+    joint_map: Optional[str] = typer.Option(None, help="Robot name or joint-map YAML (for active IDs)."),
+    out: str = typer.Option("runs/sim/custom_arm_ghost_preview.png", help="Output image (PNG; metadata JSON beside it)."),
+    height_clearance_m: float = typer.Option(0.10),
+):
+    """Visualize the image-derived above-table ghost fold. SIMULATION ONLY (no hardware)."""
+    from terafold.sim.ghost_preview import run_sim_real_ghost_fold
+
+    res = run_sim_real_ghost_fold(plan_json, joint_map=joint_map, out=out,
+                                  height_clearance_m=height_clearance_m, on_log=_echo)
+    _ok(f"sim-real-ghost-fold preview ({res['status']}): contact_disabled={res['contact_disabled']}, "
+        f"touches_table={res['touches_table']}, rendered={res['rendered']}")
+    _echo(f"  waypoints={res['num_waypoints']}  min_z={res['min_z']}m  direction={res.get('fold_direction')}")
+    _echo(f"  meta : {res['meta_json']}")
+    for w in res.get("warnings", []):
+        _echo(f"  ⚠ {w}")
+
+
+# --------------------------------------------------------------------------
+# Towel real-image-first dataset + YOLO pose + plan critic pipeline
+# --------------------------------------------------------------------------
+
+
+@app.command("create-towel-real-dataset")
+def create_towel_real_dataset_cmd(
+    images: str = typer.Option(..., help="Folder of real towel images."),
+    out: str = typer.Option(..., help="Output dataset directory."),
+    source: str = typer.Option("user_photo", help="user_photo | external | synthetic."),
+):
+    """Build a REAL-image towel dataset (default path): copy + normalize + label templates."""
+    from terafold.towel.dataset import create_towel_real_dataset
+
+    res = create_towel_real_dataset(images, out, source=source, log=_echo)
+    _ok(f"Created dataset: {res['num_images']} images -> {out} "
+        f"({res['skipped_duplicates']} duplicates skipped)")
+    _echo(f"  manifest: {res['manifest']}")
+    _echo(f"  next: terafold label-towel-folder --dataset {out}")
+
+
+@app.command("label-towel-image")
+def label_towel_image_cmd(
+    image: str = typer.Option(..., help="Image to label."),
+    label: str = typer.Option(..., help="Output label JSON path."),
+    state: Optional[str] = typer.Option(None, help="Towel state (default keeps/flat_unfolded)."),
+    no_gui: bool = typer.Option(False, "--no-gui", help="Force terminal coordinate input."),
+):
+    """Label one towel image: click/enter 4 corners (tl, tr, br, bl) + state."""
+    from terafold.towel.labeling import label_towel_image
+
+    res = label_towel_image(image, label, state=state, use_gui=not no_gui, log=_echo)
+    _ok(f"Labeled -> {res['label_path']}  corners={res['corners']}")
+    if res.get("overlay"):
+        _echo(f"  overlay: {res['overlay']}")
+
+
+@app.command("label-towel-folder")
+def label_towel_folder_cmd(
+    dataset: str = typer.Option(..., help="Towel dataset directory."),
+):
+    """Loop unlabeled images: label corners, or mark bad_view/multiple_towels/not_towel/skip."""
+    from terafold.towel.labeling import label_towel_folder
+
+    res = label_towel_folder(dataset, log=_echo)
+    _ok(f"Done: {res['labeled']} labeled, {res['skipped']} skipped, "
+        f"{res['marked_bad']} marked bad (of {res['total']}).")
+
+
+@app.command("import-towel-web-dataset")
+def import_towel_web_dataset_cmd(
+    source: str = typer.Option(..., help="folder | roboflow | kaggle | huggingface | open_images."),
+    out: str = typer.Option(..., help="Output dataset directory."),
+    query: str = typer.Option("towel"),
+    max_images: int = typer.Option(500),
+    src_dir: Optional[str] = typer.Option(None, help="Local export folder (folder/roboflow/kaggle)."),
+    hf_repo: Optional[str] = typer.Option(None, help="HuggingFace dataset repo id (source huggingface)."),
+    license_note: str = typer.Option("", help="License/provenance note recorded in the manifest."),
+):
+    """Import external real towel images LEGALLY (no scraping). Manual instructions if needed."""
+    from terafold.towel.web_import import import_towel_web_dataset
+
+    res = import_towel_web_dataset(source, out, query=query, max_images=max_images,
+                                   src_dir=src_dir, hf_repo=hf_repo, license_note=license_note,
+                                   log=_echo)
+    status = res.get("status")
+    if status == "ok":
+        _ok(f"Imported {res['num_images']} external images -> {res['out']} (needs labeling).")
+    elif status == "manual_instructions":
+        _err(f"Manual steps required for source '{source}':")
+        for s in res.get("instructions", []):
+            _echo(f"  - {s}")
+        if res.get("install"):
+            _echo(f"  install: {res['install']}")
+        raise typer.Exit(2)
+    else:
+        _err(res.get("message", "import failed"))
+        if res.get("supported"):
+            _echo(f"  supported sources: {res['supported']}")
+        raise typer.Exit(1)
+
+
+@app.command("merge-towel-datasets")
+def merge_towel_datasets_cmd(
+    inputs: str = typer.Option(..., help="Comma-separated dataset dirs."),
+    out: str = typer.Option(..., help="Merged output dataset dir."),
+    real_only: bool = typer.Option(False, "--real-only", help="Drop synthetic samples."),
+):
+    """Merge usable labeled samples (dedup by hash) into a train/val/test split."""
+    from terafold.towel.merge import merge_towel_datasets
+
+    dirs = [d for d in inputs.split(",") if d.strip()]
+    res = merge_towel_datasets(dirs, out, real_only=real_only, log=_echo)
+    _ok(f"Merged {res['num_images']} usable samples -> {out}")
+    _echo(f"  split train/val/test = {res['by_split']['train']}/{res['by_split']['val']}/"
+          f"{res['by_split']['test']}   by source: {res['by_source']}")
+
+
+@app.command("generate-towel-dataset")
+def generate_towel_dataset_cmd(
+    num: int = typer.Option(1000, help="Number of synthetic images."),
+    out: str = typer.Option(..., help="Output dataset dir."),
+    image_size: int = typer.Option(256),
+    seed: int = typer.Option(0),
+):
+    """OPTIONAL synthetic towel augmentation (NOT the main path — real images are default)."""
+    from terafold.towel.synthetic import generate_towel_dataset
+
+    res = generate_towel_dataset(num, out, image_size=image_size, seed=seed, log=_echo)
+    _ok(f"Generated {res['num_images']} SYNTHETIC (augmentation-only) images -> {res['out']}")
+
+
+@app.command("export-yolo-towel-pose")
+def export_yolo_towel_pose_cmd(
+    data: str = typer.Option(..., help="A (merged) towel dataset dir."),
+    out: str = typer.Option(..., help="YOLO pose dataset output dir."),
+    include_pseudolabels: str = typer.Option(
+        "none", "--include-pseudolabels",
+        help="none (default, exclude Claude pseudo-labels) | approved_only."),
+    include_critic_negatives: bool = typer.Option(
+        False, "--include-critic-negatives",
+        help="Include training_track=critic_negative samples (excluded by default)."),
+):
+    """Export labeled samples to YOLO pose (1 class towel, 4 corners tl/tr/br/bl)."""
+    from terafold.towel.yolo_export import (INCLUDE_PSEUDOLABEL_MODES,
+                                            export_yolo_towel_pose)
+
+    if include_pseudolabels not in INCLUDE_PSEUDOLABEL_MODES:
+        _err(f"--include-pseudolabels must be one of {list(INCLUDE_PSEUDOLABEL_MODES)}")
+        raise typer.Exit(1)
+    res = export_yolo_towel_pose(data, out, include_pseudolabels=include_pseudolabels,
+                                 include_critic_negatives=include_critic_negatives, log=_echo)
+    _ok(f"Exported {res['exported']} samples -> {out}  (rejected {res['rejected']})")
+    bysrc = res["by_source"]
+    _echo("  by source: " + " ".join(f"{g}={n}" for g, n in bysrc.items() if n))
+    _echo(f"  by training_track: {res['by_training_track']}")
+    excl = (res.get("skipped_pseudolabels", 0) or res.get("skipped_unapproved_pseudo", 0)
+            or res.get("skipped_critic_negatives", 0))
+    if excl:
+        _echo(f"  excluded: {res['skipped_pseudolabels']} pseudo (policy='{include_pseudolabels}'), "
+              f"{res['skipped_unapproved_pseudo']} unapproved, "
+              f"{res['skipped_critic_negatives']} critic-negative")
+    _echo(f"  yaml: {res['yaml']}  (kpt_shape={res['kpt_shape']})")
+
+
+@app.command("print-towel-training-command")
+def print_towel_training_command_cmd(
+    data: str = typer.Option(..., help="YOLO pose dataset dir (has towel_pose.yaml)."),
+    model: str = typer.Option("yolo26n-pose.pt", help="Base model (fallback yolo11n-pose.pt)."),
+    epochs: int = typer.Option(100),
+    imgsz: int = typer.Option(640),
+    batch: int = typer.Option(16),
+):
+    """Print a copy-paste YOLO pose training command (local or RunPod)."""
+    from terafold.towel.yolo_runtime import print_towel_training_command
+
+    res = print_towel_training_command(data, model=model, epochs=epochs, imgsz=imgsz, batch=batch)
+    _echo(res["command"])
+    _echo("")
+    _echo(f"# fallback (older model name): {res['fallback_command']}")
+    if res.get("runpod_note"):
+        _echo(f"# RunPod: {res['runpod_note']}")
+
+
+@app.command("infer-towel-pose")
+def infer_towel_pose_cmd(
+    image: str = typer.Option(..., help="Image to run towel corner-pose detection on."),
+    weights: str = typer.Option(..., help="Trained YOLO pose weights (best.pt)."),
+    out: Optional[str] = typer.Option(None, help="JSON output path."),
+    overlay_out: Optional[str] = typer.Option(None, help="Overlay image output path."),
+    conf: float = typer.Option(0.25),
+):
+    """Run the trained towel corner-pose detector on one image (Ultralytics)."""
+    from terafold.towel.yolo_runtime import infer_towel_pose
+
+    res = infer_towel_pose(image, weights, out=out, overlay_out=overlay_out, conf=conf, log=_echo)
+    status = res.get("status")
+    if status == "unavailable":
+        _err(res.get("message", "Ultralytics not installed."))
+        _err(f"Run:  {res.get('install')}")
+        raise typer.Exit(1)
+    if status == "no_detection":
+        _err("No towel detected.")
+        raise typer.Exit(2)
+    _ok(f"corners={res['corners']}  avg_conf={res.get('avg_keypoint_confidence'):.2f}")
+    if res.get("out"):
+        _echo(f"  json   : {res['out']}")
+    if res.get("overlay"):
+        _echo(f"  overlay: {res['overlay']}")
+
+
+@app.command("evaluate-towel-pose")
+def evaluate_towel_pose_cmd(
+    data: str = typer.Option(..., help="Towel dataset dir (labeled)."),
+    weights: str = typer.Option(..., help="Trained YOLO pose weights."),
+    out: str = typer.Option(..., help="Eval output dir / Markdown path."),
+):
+    """Evaluate a trained towel pose model: corner error, IoU, error by source/state."""
+    from terafold.towel.yolo_runtime import evaluate_towel_pose
+
+    res = evaluate_towel_pose(data, weights, out, log=_echo)
+    if res.get("status") == "unavailable":
+        _err(res.get("message", "Ultralytics not installed."))
+        _err(f"Run:  {res.get('install')}")
+        raise typer.Exit(1)
+    _ok(f"Evaluated. report -> {res.get('report')}")
+
+
+@app.command("build-plan-critic-dataset")
+def build_plan_critic_dataset_cmd(
+    data: str = typer.Option(..., help="A towel dataset dir."),
+    out: str = typer.Option(..., help="Plan-critic dataset output dir."),
+):
+    """Derive a fold-plan-critic feature table from a towel dataset."""
+    from terafold.towel.plan_critic import build_plan_critic_dataset
+
+    res = build_plan_critic_dataset(data, out, log=_echo)
+    _ok(f"Built critic dataset: {res['rows']} rows "
+        f"({res['positives']} pos / {res['negatives']} neg) -> {res['out']}")
+
+
+@app.command("train-plan-critic")
+def train_plan_critic_cmd(
+    data: str = typer.Option(..., help="Plan-critic dataset dir (critic_dataset.jsonl)."),
+    out: str = typer.Option(..., help="Output run dir (model.pt)."),
+):
+    """Train the fold-plan critic (scaffold: torch if present, else numpy logistic)."""
+    from terafold.towel.plan_critic import train_plan_critic
+
+    res = train_plan_critic(data, out, log=_echo)
+    _ok(f"Trained plan critic ({res['backend']}): {res['model']}  train_acc={res.get('train_acc')}")
+
+
+@app.command("eval-plan-critic")
+def eval_plan_critic_cmd(
+    data: str = typer.Option(..., help="Plan-critic dataset dir."),
+    model: str = typer.Option(..., help="Trained model.pt."),
+    out: str = typer.Option(..., help="Markdown report output path."),
+):
+    """Evaluate the fold-plan critic and write a Markdown report."""
+    from terafold.towel.plan_critic import eval_plan_critic
+
+    res = eval_plan_critic(data, model, out, log=_echo)
+    _ok(f"Plan critic eval: accuracy={res.get('accuracy')}  report -> {res.get('report', out)}")
+
+
+# --------------------------------------------------------------------------
+# External real-image ingest + Claude pseudo-labeling pipeline
+# --------------------------------------------------------------------------
+
+
+def _print_lines(lines, prefix="  - "):
+    for ln in lines or []:
+        _echo(f"{prefix}{ln}" if ln else "")
+
+
+@app.command("import-kaggle-towel-dataset")
+def import_kaggle_towel_dataset_cmd(
+    dataset: str = typer.Option(..., help="Kaggle dataset slug, e.g. owner/dataset-slug."),
+    out: str = typer.Option(..., help="Output RAW image dataset directory."),
+    max_images: int = typer.Option(2000, help="Max images to ingest."),
+    min_size: int = typer.Option(64, help="Skip images whose smaller side is below this (px)."),
+    src_dir: Optional[str] = typer.Option(None, help="Use an already-downloaded export (offline)."),
+    license_note: str = typer.Option("", help="License/provenance note for the manifest."),
+):
+    """Ingest a Kaggle towel dataset into a RAW image dataset (no labels yet)."""
+    from terafold.towel.raw_ingest import import_kaggle_towel_dataset
+
+    res = import_kaggle_towel_dataset(dataset, out, max_images=max_images, min_size=min_size,
+                                      src_dir=src_dir, license_note=license_note, log=_echo)
+    status = res.get("status")
+    if status == "ok":
+        _ok(f"Ingested {res['num_images']} raw Kaggle images -> {out} (needs filtering/labeling).")
+        _echo(f"  manifest: {res['manifest']}")
+        _echo(f"  next: terafold filter-towel-images --input {out} --out data/towel_candidates_v0")
+        return
+    if status == "unavailable":
+        _err("Kaggle client/credentials not available.")
+        _print_lines(res.get("instructions"))
+        raise typer.Exit(2)
+    _err(res.get("message", "Kaggle import failed."))
+    _print_lines(res.get("instructions"))
+    raise typer.Exit(1)
+
+
+@app.command("import-openimages-towels")
+def import_openimages_towels_cmd(
+    out: str = typer.Option(..., help="Output RAW image dataset directory."),
+    max_images: int = typer.Option(2000, help="Max images to ingest."),
+    min_size: int = typer.Option(64, help="Skip images whose smaller side is below this (px)."),
+    src_dir: Optional[str] = typer.Option(None, help="Locally-downloaded Open Images Towel folder."),
+    license_note: str = typer.Option("", help="License/provenance note for the manifest."),
+):
+    """Ingest Open Images 'Towel' images (manual download path) into a RAW dataset."""
+    from terafold.towel.raw_ingest import import_openimages_towels
+
+    res = import_openimages_towels(out, max_images=max_images, min_size=min_size,
+                                   src_dir=src_dir, license_note=license_note, log=_echo)
+    status = res.get("status")
+    if status == "ok":
+        _ok(f"Ingested {res['num_images']} raw Open Images towels -> {out}.")
+        _echo(f"  manifest: {res['manifest']}")
+        _echo(f"  next: terafold filter-towel-images --input {out} --out data/towel_candidates_v0")
+        return
+    if status == "manual_instructions":
+        _err("Manual Open Images download required (boxes are not towel corners):")
+        _print_lines(res.get("instructions"))
+        raise typer.Exit(2)
+    _err(res.get("message", "Open Images import failed."))
+    raise typer.Exit(1)
+
+
+@app.command("filter-towel-images")
+def filter_towel_images_cmd(
+    input: str = typer.Option(..., help="Raw/candidate manifest, a create-towel-real-dataset "
+                              "dataset, an images/ dir, or a plain image folder."),
+    out: str = typer.Option(..., help="Output candidate dataset dir."),
+    mode: str = typer.Option("filename_or_vlm", help="filename | filename_or_vlm | all."),
+    max_images: int = typer.Option(1000, help="Max candidates to keep."),
+    min_size: int = typer.Option(0, help="Small-image cut (0 = default; 'all' uses a 16px floor)."),
+    trust_source: bool = typer.Option(False, "--trust-source",
+                                      help="Trust the source: keep all valid images (alias for --mode all)."),
+):
+    """Keep likely-towel images by keyword/VLM, or keep ALL valid images (--mode all / --trust-source)."""
+    from terafold.towel.filtering import filter_towel_images
+
+    if trust_source:
+        mode = "all"
+    res = filter_towel_images(input, out, mode=mode, max_images=max_images,
+                              min_size=min_size, log=_echo)
+    if res.get("status") != "ok":
+        _err(res.get("message", "filter failed"))
+        if res.get("modes"):
+            _echo(f"  modes: {res['modes']}")
+        raise typer.Exit(1)
+    _ok(f"Kept {res['kept']} candidates (of {res['num_input']}) -> {out}  "
+        f"[{res['rejected']} rejected; mode={res['mode']}]")
+    _echo(f"  reasons: {res['reasons']}")
+    _echo(f"  next: terafold claude-label-towel-folder --input {out} "
+          "--out data/towel_pseudolabeled_v0")
+
+
+@app.command("crop-real-towel-candidates")
+def crop_real_towel_candidates_cmd(
+    input: str = typer.Option(..., help="Raw/candidate manifest, a create-towel-real-dataset "
+                              "dataset, an images/ dir, or a plain image folder of FULL photos."),
+    out: str = typer.Option(..., help="Output crop dataset dir (tight crops + remap metadata)."),
+    target_description: str = typer.Option(
+        "beige and white striped towel",
+        help="What Claude must localize (and ignore the bed/pillow/blanket/headboard/floor/body)."),
+    max_images: int = typer.Option(500, help="Max images to send to Claude."),
+    model: str = typer.Option("claude-opus-4-8", help="Anthropic model id."),
+    min_confidence: float = typer.Option(0.5, help="Reject a localization below this confidence."),
+    pad_frac: float = typer.Option(0.08, help="Padding around the detected box (fraction of box size)."),
+    max_crop_size: int = typer.Option(1024, help="Downscale crops so the longest side <= this (px)."),
+    resume: bool = typer.Option(False, "--resume", help="Skip images already cropped in --out."),
+    force: bool = typer.Option(False, "--force", "--recrop",
+                               help="Re-localize/crop every image, overwriting old crops."),
+):
+    """Crop-first: ask Claude for ONLY the target towel's box, then save a tight crop.
+
+    Fixes the "Claude labeled the bed/headboard instead of the towel" problem by
+    localizing the striped towel first; corners labeled on the crops remap back to the
+    original full images via each crop's metadata.
+    """
+    from terafold.towel.crop_candidates import crop_real_towel_candidates
+
+    res = crop_real_towel_candidates(
+        input, out, target_description=target_description, max_images=max_images, model=model,
+        min_confidence=min_confidence, pad_frac=pad_frac, max_crop_size=max_crop_size,
+        resume=resume, force=force, log=_echo)
+    status = res.get("status")
+    if status == "no_api_key":
+        _err("Anthropic API key not configured.")
+        _print_lines(res.get("instructions"))
+        raise typer.Exit(2)
+    if status != "ok":
+        _err(res.get("message", "Towel cropping failed."))
+        raise typer.Exit(1)
+    _ok(f"Cropped {res['num_crops']} / {res['num_input']} towel candidates -> {out}  "
+        f"({res['num_rejected']} rejected, {res['errors']} errors)")
+    usage = res.get("usage", {})
+    _echo(f"  tokens in/out: {usage.get('input_tokens', 0)}/{usage.get('output_tokens', 0)}  "
+          f"est cost ~${res.get('cost_estimate_usd', 0)} (approx — verify Anthropic pricing)")
+    _echo(f"  next: terafold claude-label-towel-folder --input {out} "
+          "--label-policy outer_visible_corners_striped_towel_only --force "
+          "--out data/towel_real_labeled_v1_crops --min-confidence 0.65")
+
+
+@app.command("claude-label-towel-folder")
+def claude_label_towel_folder_cmd(
+    input: str = typer.Option(..., help="Raw/candidate manifest, a create-towel-real-dataset "
+                              "dataset, a crop dataset (crop-real-towel-candidates), an images/ "
+                              "dir, or a plain image folder."),
+    out: str = typer.Option(..., help="Output pseudo-labeled towel dataset dir."),
+    max_images: int = typer.Option(500, help="Max images to send to Claude."),
+    model: str = typer.Option("claude-opus-4-8", help="Anthropic model id."),
+    min_confidence: float = typer.Option(0.75, help="Below this -> review_needed."),
+    label_policy: str = typer.Option(
+        "default", help="default | outer_visible_corners_any_state "
+        "(pixel-accurate visible outer corners, accepts folded states) | "
+        "outer_visible_corners_striped_towel_only (crop-first striped-towel only; "
+        "remaps corners back to full images)."),
+    resume: bool = typer.Option(False, "--resume", help="Skip images already labeled in --out."),
+    force: bool = typer.Option(False, "--force", "--relabel",
+                               help="Re-label every image, overwriting old (loose) labels."),
+):
+    """Pseudo-label towel images with Claude Vision (geometry only; human review required)."""
+    from terafold.towel.claude_pseudolabel import (LABEL_POLICIES,
+                                                    claude_label_towel_folder)
+
+    if label_policy not in LABEL_POLICIES:
+        _err(f"--label-policy must be one of {list(LABEL_POLICIES)}")
+        raise typer.Exit(1)
+    res = claude_label_towel_folder(input, out, max_images=max_images, model=model,
+                                    min_confidence=min_confidence, resume=resume, force=force,
+                                    label_policy=label_policy, log=_echo)
+    status = res.get("status")
+    if status == "no_api_key":
+        _err("Anthropic API key not configured.")
+        _print_lines(res.get("instructions"))
+        raise typer.Exit(2)
+    if status != "ok":
+        _err(res.get("message", "Claude labeling failed."))
+        raise typer.Exit(1)
+    _ok(f"Pseudo-labeled {res['num_images']} images -> {out}  "
+        f"({res['review_needed']} need review, {res['errors']} errors)")
+    usage = res.get("usage", {})
+    _echo(f"  tokens in/out: {usage.get('input_tokens', 0)}/{usage.get('output_tokens', 0)}  "
+          f"est cost ~${res.get('cost_estimate_usd', 0)} (approx — verify Anthropic pricing)")
+    _echo("  ⚠️ pseudo-labels can be WRONG — review before training:")
+    _echo(f"  next: terafold review-pseudolabels --dataset {out}")
+
+
+@app.command("openai-label-towel-folder")
+def openai_label_towel_folder_cmd(
+    input: str = typer.Option(..., help="Raw/candidate manifest, a create-towel-real-dataset "
+                              "dataset, a crop dataset, an images/ dir, or a plain image folder."),
+    out: str = typer.Option(..., help="Output pseudo-labeled towel dataset dir."),
+    max_images: int = typer.Option(500, help="Max images to send to OpenAI (use a small N to test cheaply)."),
+    model: str = typer.Option("gpt-5.5", help="OpenAI vision model id (Responses API)."),
+    min_confidence: float = typer.Option(0.75, help="Below this -> review_needed."),
+    label_policy: str = typer.Option(
+        "striped_towel_visible_outer_corners",
+        help="Labeling policy (default: striped-towel-only, visible outer corners)."),
+    multipass: bool = typer.Option(
+        False, "--multipass",
+        help="HIGH-PRECISION multi-stage pipeline: localize -> crop+zoom -> corner-label "
+             "-> remap -> verify -> geometry-gate (more calls per image, tighter corners)."),
+    crop_padding: float = typer.Option(0.08, help="[multipass] padding around the detected towel bbox."),
+    verify: bool = typer.Option(True, "--verify/--no-verify",
+                                help="[multipass] run the verification pass on the remapped corners."),
+    debug: bool = typer.Option(False, "--debug",
+                               help="[multipass] log each stage (provider/model/image/extracted) and "
+                                    "save raw-response snippets to <out>/debug/ on parse failure."),
+    resume: bool = typer.Option(False, "--resume", help="Skip images already labeled in --out."),
+    force: bool = typer.Option(False, "--force", "--relabel",
+                               help="Re-label every image, overwriting old labels."),
+):
+    """Pseudo-label towel images with OpenAI Vision (second opinion; geometry only; human review required).
+
+    A second labeler for when Claude labels the bed/background instead of the beige/
+    white striped towel. Same towel schema, validation, overlays, and review gating.
+    Add ``--multipass`` for the high-precision localize → crop → verify pipeline.
+    """
+    from terafold.towel.openai_pseudolabel import openai_label_towel_folder
+
+    res = openai_label_towel_folder(input, out, max_images=max_images, model=model,
+                                    min_confidence=min_confidence, resume=resume, force=force,
+                                    label_policy=label_policy, multipass=multipass,
+                                    crop_padding=crop_padding, verify=verify, debug=debug, log=_echo)
+    status = res.get("status")
+    if status == "no_api_key":
+        _err("OpenAI API key not configured.")
+        _print_lines(res.get("instructions"))
+        raise typer.Exit(2)
+    if status != "ok":
+        _err(res.get("message", "OpenAI labeling failed."))
+        raise typer.Exit(1)
+    if multipass:
+        _ok(f"Multipass-labeled {res['num_images']} images -> {out}  "
+            f"({res['review_needed']} need review, {res['label_rejected']} label-rejected, "
+            f"{res['rejected_localization']} localization-rejected, {res['errors']} errors)")
+    else:
+        _ok(f"Pseudo-labeled {res['num_images']} images -> {out}  "
+            f"({res['review_needed']} need review, {res['errors']} errors)")
+    usage = res.get("usage", {})
+    _echo(f"  tokens in/out: {usage.get('input_tokens', 0)}/{usage.get('output_tokens', 0)}  "
+          "(verify current OpenAI pricing for this model)")
+    _echo("  ⚠️ pseudo-labels can be WRONG — review before training:")
+    _echo(f"  next: terafold review-pseudolabels --dataset {out}")
+
+
+@app.command("review-pseudolabels")
+def review_pseudolabels_cmd(
+    dataset: str = typer.Option(..., help="Pseudo-labeled towel dataset dir."),
+    all: bool = typer.Option(False, "--all", help="Review every pseudo-label, not just pending."),
+    source: Optional[str] = typer.Option(None, help="Only review this provenance (e.g. openai_generated)."),
+    category: Optional[str] = typer.Option(None, help="Only review this category_target (e.g. positive_flat)."),
+):
+    """Approve / reject / edit Claude pseudo-labels one by one; writes review_report.md."""
+    from terafold.towel.review import review_pseudolabels
+
+    res = review_pseudolabels(dataset, log=_echo, only_pending=not all,
+                              source_filter=source, category_filter=category)
+    if res.get("status") != "ok":
+        _err(res.get("message", "review failed"))
+        raise typer.Exit(1)
+    _ok(f"Reviewed: {res['approved']} approved, {res['rejected']} rejected, "
+        f"{res['needs_review']} still need review.")
+    _echo(f"  report: {res['report']}")
+
+
+@app.command("approve-high-confidence-pseudolabels")
+def approve_high_confidence_pseudolabels_cmd(
+    dataset: str = typer.Option(..., help="Pseudo-labeled towel dataset dir."),
+    min_confidence: float = typer.Option(0.90, help="Minimum Claude confidence to auto-approve."),
+    max_geometry_error: float = typer.Option(0.10, help="Max quad geometry error to auto-approve."),
+    source: Optional[str] = typer.Option(None, help="Only consider this provenance (e.g. openai_generated)."),
+    category: Optional[str] = typer.Option(None, help="Only consider this category_target."),
+):
+    """Auto-approve ONLY high-confidence, geometrically-sound pseudo-labels (rest stay for review)."""
+    from terafold.towel.review import approve_high_confidence_pseudolabels
+
+    res = approve_high_confidence_pseudolabels(
+        dataset, min_confidence=min_confidence, max_geometry_error=max_geometry_error,
+        source_filter=source, category_filter=category, log=_echo)
+    if res.get("status") != "ok":
+        _err(res.get("message", "auto-approve failed"))
+        raise typer.Exit(1)
+    _ok(f"Auto-approved {res['auto_approved']} / {res['considered']} pseudo-labels; "
+        f"{res['needs_review']} left for human review.")
+    _echo("  ⚠️ pseudo-labels can be wrong — spot-check overlays before training.")
+
+
+# --------------------------------------------------------------------------
+# OpenAI-generated towel image pipeline (Layer B — realism bridge)
+# --------------------------------------------------------------------------
+
+
+@app.command("preview-openai-towel-prompts")
+def preview_openai_towel_prompts_cmd(
+    task: str = typer.Option("mix_flat_wrinkled_negatives", help="Prompt curriculum task/mix."),
+    num: int = typer.Option(20, help="How many sample prompts to show."),
+    seed: int = typer.Option(0, help="Seed for reproducible prompt sampling."),
+):
+    """Preview the generated-towel prompt curriculum (no API calls, no cost)."""
+    from terafold.towel.prompt_bank import (allocate_counts, build_prompt_curriculum,
+                                            list_tasks)
+
+    if task not in list_tasks():
+        _err(f"unknown task {task!r}; known: {list_tasks()}")
+        raise typer.Exit(1)
+    recs = build_prompt_curriculum(task, num, seed=seed)
+    _ok(f"Task '{task}' — {len(recs)} sample prompts (target mix: {allocate_counts(task, num)})")
+    for i, r in enumerate(recs, 1):
+        _echo(f"\n[{i}] ({r['category']} → target_state={r['target_state']}, "
+              f"usable_hint={r['usable_hint']})")
+        _echo(f"    {r['prompt']}")
+
+
+@app.command("generate-openai-towel-dataset")
+def generate_openai_towel_dataset_cmd(
+    out: str = typer.Option(..., help="Output generated-dataset directory."),
+    num_images: int = typer.Option(100, help="Number of images to generate."),
+    model: str = typer.Option("gpt-image-1", help="OpenAI image model (e.g. gpt-image-1, dall-e-3)."),
+    size: str = typer.Option("1024", help="Image size: 1024 | 1024x1536 | 1536x1024 | auto."),
+    task: str = typer.Option("mix_flat_wrinkled_negatives", help="Prompt curriculum task/mix."),
+    quality: str = typer.Option("medium", help="low | medium | high (gpt-image-1) / standard | hd (dall-e)."),
+    seed: int = typer.Option(0, help="Seed for reproducible prompt sampling."),
+    dry_run: bool = typer.Option(True, "--dry-run/--no-dry-run",
+                                 help="Preview prompts+cost without calling the API (default ON)."),
+    max_cost_usd: Optional[float] = typer.Option(None, help="Refuse if predicted cost exceeds this."),
+    confirm: bool = typer.Option(False, "--yes-i-understand-this-uses-paid-api",
+                                 help="Required acknowledgement for REAL paid generation."),
+    resume: bool = typer.Option(False, "--resume", help="Skip images already generated in --out."),
+):
+    """Generate photorealistic hotel-towel images via OpenAI (cost-gated; dry-run by default)."""
+    from terafold.towel.openai_generation import generate_openai_towel_dataset
+
+    res = generate_openai_towel_dataset(
+        out, num_images, model=model, size=size, task=task, quality=quality, seed=seed,
+        dry_run=dry_run, max_cost_usd=max_cost_usd, confirm=confirm, resume=resume, log=_echo)
+    status = res.get("status")
+    if status == "dry_run":
+        est = res["cost_estimate"]
+        _ok(f"[dry-run] would generate {res['num_requested']} images -> {out} "
+            f"(est ~${est['total_usd']}, {'known' if est['known_pricing'] else 'UNKNOWN'} pricing).")
+        _echo(f"  by category: {res['by_category']}")
+        _echo(f"  preview {len(res['preview'])} prompts; full plan in {res['manifest']}")
+        _echo("  to really generate: add --no-dry-run --max-cost-usd <cap> "
+              "--yes-i-understand-this-uses-paid-api")
+        return
+    if status == "no_api_key":
+        _err("OPENAI_API_KEY not configured.")
+        _print_lines(res.get("instructions"))
+        raise typer.Exit(2)
+    if status == "needs_confirmation":
+        _err(res["message"])
+        raise typer.Exit(2)
+    if status == "cost_exceeded":
+        _err(res["message"])
+        raise typer.Exit(3)
+    if status == "sdk_missing":
+        _err("OpenAI SDK not installed.")
+        _print_lines(res.get("instructions"))
+        raise typer.Exit(2)
+    if status != "ok":
+        _err(res.get("message", "generation failed"))
+        raise typer.Exit(1)
+    _ok(f"Generated {res['num_images']} images -> {out}  "
+        f"(~${res['cost_actual_usd']} actual, {res['errors']} errors, {res['resumed']} resumed)")
+    _echo(f"  by category: {res['by_category']}")
+    _echo(f"  next: terafold filter-generated-towel-images --input {out} --out data/towel_openai_qc_v0")
+
+
+@app.command("filter-generated-towel-images")
+def filter_generated_towel_images_cmd(
+    input: str = typer.Option(..., help="A generated (or raw) image dataset dir."),
+    out: str = typer.Option(..., help="Output QC'd candidate dataset dir."),
+    min_size: int = typer.Option(64, help="Drop images whose smaller side is below this (px)."),
+    max_images: Optional[int] = typer.Option(None, help="Cap kept images."),
+    near_dup_hamming: int = typer.Option(5, help="Perceptual near-duplicate Hamming threshold."),
+    no_perceptual: bool = typer.Option(False, "--no-perceptual", help="Disable perceptual dedup."),
+    require_metadata: bool = typer.Option(False, "--require-metadata",
+                                          help="Reject samples missing generation lineage."),
+):
+    """QC generated images (validity, dims, exact+perceptual dedup, metadata) -> candidates."""
+    from terafold.towel.qc import qc_filter_generated_images
+
+    res = qc_filter_generated_images(
+        input, out, min_size=min_size, max_images=max_images, near_dup_hamming=near_dup_hamming,
+        dedup_perceptual=not no_perceptual, require_metadata=require_metadata, log=_echo)
+    if res.get("status") != "ok":
+        _err(res.get("message", "QC failed"))
+        raise typer.Exit(1)
+    _ok(f"QC kept {res['kept']} / {res['num_input']} -> {out}  ({res['rejected']} rejected)")
+    _echo(f"  reasons: {res['reasons']}  incomplete_metadata: {res['incomplete_metadata']}")
+    _echo(f"  next: terafold claude-label-towel-folder --input {out} "
+          "--out data/towel_openai_labeled_v0 --min-confidence 0.75")
+
+
+@app.command("summarize-openai-towel-dataset")
+def summarize_openai_towel_dataset_cmd(
+    data: str = typer.Option(..., help="A generated towel dataset dir."),
+    out: Optional[str] = typer.Option(None, help="Optional Markdown report path."),
+):
+    """Summarize a generated dataset: counts by category / status / size + cost."""
+    from terafold.towel.generated_dataset import summarize_generated_dataset
+
+    res = summarize_generated_dataset(data, out=out, log=_echo)
+    _ok(f"{res['num_images']} generated images (~${res['cost_actual_usd']}); "
+        f"usable_for_training={res['usable_for_training']}")
+    if res.get("report"):
+        _echo(f"  report: {res['report']}")
+
+
+@app.command("recommend-towel-training-plan")
+def recommend_towel_training_plan_cmd(
+    data: str = typer.Option(..., help="A towel dataset / merged dataset / YOLO pose dataset dir."),
+    out: Optional[str] = typer.Option(None, help="Optional Markdown report path."),
+):
+    """Report dataset composition + print the recommended staged training strategy."""
+    from terafold.towel.training_plan import recommend_towel_training_plan
+
+    res = recommend_towel_training_plan(data, out=out, log=_echo)
+    if res.get("status") != "ok":
+        _err(res.get("message", "could not build plan"))
+        raise typer.Exit(1)
+    if res.get("report"):
+        _echo(f"  report: {res['report']}")
+
+
+@app.command("auto-triage-pseudolabels")
+def auto_triage_pseudolabels_cmd(
+    dataset: str = typer.Option(..., help="Pseudo-labeled towel dataset dir."),
+    policy: str = typer.Option("pose_positive_strict",
+                               help="pose_positive_strict (flat/wrinkled only) | "
+                                    "outer_visible_corners_any_state (any state, 4 visible corners)."),
+    apply: bool = typer.Option(False, "--apply/--dry-run",
+                               help="Apply changes (default: dry-run, no labels modified)."),
+    min_confidence_approve: float = typer.Option(0.88, help="Min confidence to auto-approve."),
+    min_confidence_reject: float = typer.Option(0.75, help="Below this -> auto-reject."),
+    source: Optional[str] = typer.Option(None, help="Only triage this provenance."),
+    category: Optional[str] = typer.Option(None, help="Only triage this category_target."),
+):
+    """Auto-approve/reject/keep-for-review pseudo-labels by policy (does NOT blindly approve)."""
+    from terafold.towel.review import TRIAGE_POLICIES, auto_triage_pseudolabels
+
+    if policy not in TRIAGE_POLICIES:
+        _err(f"--policy must be one of {list(TRIAGE_POLICIES)}")
+        raise typer.Exit(1)
+    res = auto_triage_pseudolabels(
+        dataset, policy=policy, apply=apply, min_confidence_approve=min_confidence_approve,
+        min_confidence_reject=min_confidence_reject, source_filter=source,
+        category_filter=category, log=_echo)
+    if res.get("status") != "ok":
+        _err(res.get("message", "triage failed"))
+        raise typer.Exit(1)
+    mode = "applied" if apply else "dry-run (no labels modified)"
+    _ok(f"Auto-triage [{policy}, {mode}]: {res['auto_approved']} approved, "
+        f"{res['auto_rejected']} rejected, {res['review_needed']} need review "
+        f"(of {res['considered']}).")
+    _echo(f"  reasons: {res['reason_histogram']}")
+    _echo(f"  report: {res['report']}")
+    if not apply:
+        _echo("  (dry-run) re-run with --apply to write the label changes.")
+
+
+@app.command("build-towel-critic-from-review")
+def build_towel_critic_from_review_cmd(
+    dataset: str = typer.Option(..., help="A reviewed/triaged towel dataset dir."),
+    out: str = typer.Option(..., help="Output critic dataset dir."),
+):
+    """Build a two-class scene-usability critic dataset (usable / not_usable) from review."""
+    from terafold.towel.critic_dataset import build_towel_critic_from_review
+
+    res = build_towel_critic_from_review(dataset, out, log=_echo)
+    if res.get("status") != "ok":
+        _err(res.get("message", "critic build failed"))
+        raise typer.Exit(1)
+    _ok(f"Built critic dataset: {res['num_images']} samples -> {out}")
+    _echo(f"  by class: {res['by_class']}  (undecided skipped: {res['skipped_undecided']})")
+
+
+# --------------------------------------------------------------------------
+# YAM / MolmoAct2 (dual I2RT YAM arms — SHADOW MODE ONLY, no hardware commands)
+# --------------------------------------------------------------------------
+
+
+_YAM_STATUS_COLORS = {"PASS": "green", "WARN": "yellow", "FAIL": "red"}
+
+
+@app.command("yam-check-assets")
+def yam_check_assets_cmd(
+    config: str = typer.Option("configs/yam_dual_reference.yaml",
+                               help="Dual-YAM/MolmoAct2 reference config."),
+):
+    """Validate YAM config + assets (repos/checkpoints/URDF). Never needs hardware."""
+    from terafold.yam.assets import check_assets
+
+    res = check_assets(config)
+    for c in res["checks"]:
+        tag = typer.style(f"[{c['status']:<4}]", fg=_YAM_STATUS_COLORS[c["status"]])
+        typer.echo(f"{tag} {c['name']}: {c['detail']}")
+        if c.get("fix"):
+            _echo(f"       next: {c['fix']}")
+    if "camera_order" in res:
+        _echo(f"camera_order: {res['camera_order']}")
+        _echo(f"norm_tag:     {res['norm_tag']}")
+        _echo(f"model:        {res['model']}")
+    status = res["status"]
+    line = f"SUMMARY: {status}"
+    if status == "FAIL":
+        _err(line)
+        raise typer.Exit(1)
+    typer.echo(typer.style(line, fg=_YAM_STATUS_COLORS[status]))
+
+
+@app.command("yam-molmoact2-smoke-test")
+def yam_molmoact2_smoke_test_cmd(
+    model: str = typer.Option("allenai/MolmoAct2-BimanualYAM", help="HF model id or local path."),
+    dtype: str = typer.Option("bfloat16", help="bfloat16 (GPU) | float32 (CPU debug)."),
+    out: str = typer.Option("runs/yam_molmoact2_smoke/actions.json",
+                            help="Predicted-actions JSON (metadata.json lands beside it)."),
+    top_image: Optional[str] = typer.Option(None, help="Optional real top image (else dummy)."),
+    left_image: Optional[str] = typer.Option(None, help="Optional real left image (else dummy)."),
+    right_image: Optional[str] = typer.Option(None, help="Optional real right image (else dummy)."),
+    task: str = typer.Option("fold the towel in half neatly", help="Task text for the policy."),
+    config: Optional[str] = typer.Option(None, help="Optional YAM config (camera order/norm tag)."),
+    device: Optional[str] = typer.Option(None, help="Override device map (e.g. cuda:0)."),
+    max_new_tokens: int = typer.Option(256, help="Generation budget for action tokens."),
+    mock: bool = typer.Option(False, "--mock", help="Built-in mock adapter — no torch/GPU needed."),
+    revision: Optional[str] = typer.Option(None, help="Pin the HF repo revision/commit "
+                                           "(recommended: trust_remote_code runs hub code)."),
+):
+    """Load MolmoAct2-BimanualYAM, predict once on (dummy) images, save actions.json.
+
+    Pure inference smoke test: NOTHING is ever sent to robot hardware.
+    """
+    from terafold.yam.molmoact2_smoke import run_smoke_test
+
+    res = run_smoke_test(model_name=model, dtype=dtype, out=out, top_image=top_image,
+                         left_image=left_image, right_image=right_image, task=task,
+                         config_path=config, device=device, max_new_tokens=max_new_tokens,
+                         mock=mock, revision=revision, log=_echo)
+    if res["status"] == "deps_missing":
+        _err("Missing dependencies for MolmoAct2 inference.")
+        for line in res["instructions"]:
+            _echo(f"  {line}")
+        raise typer.Exit(2)
+    if res["status"] != "ok":
+        _err(f"{res['status']}: {res.get('message', '')}")
+        if res.get("hint"):
+            _echo(f"  hint: {res['hint']}")
+        raise typer.Exit(1)
+    _ok(f"Smoke test OK{' (mock)' if res['mock'] else ''}: action_shape={res['action_shape']}")
+    _echo(f"  actions:  {res['actions_path']}")
+    _echo(f"  metadata: {res['metadata_path']}")
+    _echo("  hardware_commanded: false (shadow stack — no robot I/O exists here)")
+
+
+@app.command("yam-create-dummy-episode")
+def yam_create_dummy_episode_cmd(
+    out: str = typer.Option(..., help="Episode dir, e.g. "
+                            "data/yam_episodes/towel_fold_smoke/episode_000001"),
+    frames: int = typer.Option(10, help="Number of timesteps."),
+    task: str = typer.Option("fold the towel in half neatly", help="Task text."),
+    seed: int = typer.Option(0, help="Determinism seed recorded in metadata."),
+    fps: float = typer.Option(10.0, help="Nominal frame rate for timestamps."),
+    config: Optional[str] = typer.Option(None, help="Optional YAM config (arms/cameras/dims)."),
+):
+    """Write a dummy YAM episode (states/actions/camera PNGs) for offline testing."""
+    from terafold.yam.config import load_yam_config
+    from terafold.yam.dataset import create_dummy_episode
+    from terafold.yam.safety import ShadowModeViolation
+
+    try:
+        cfg = load_yam_config(config) if config else None
+        res = create_dummy_episode(out, frames=frames, task=task, seed=seed, fps=fps, config=cfg)
+    except ShadowModeViolation as e:
+        _err(f"bad_config: {e}")
+        raise typer.Exit(1)
+    except (FileNotFoundError, ValueError) as e:
+        _err(f"bad_config: {e}")
+        raise typer.Exit(1)
+    _ok(f"Dummy episode written: {res['out']}  ({res['frames']} frames, "
+        f"cameras={res['cameras']}, action_dim={res['action_dim']})")
+    _echo("  next: terafold yam-shadow-policy --episode " + res["out"] + " --mock")
+
+
+@app.command("yam-build-isaac-scene")
+def yam_build_isaac_scene_cmd(
+    config: str = typer.Option("configs/yam_dual_reference.yaml",
+                               help="Dual-YAM/MolmoAct2 reference config."),
+    out: str = typer.Option("sim/yam_dual_towel_scene", help="Scene package output dir."),
+):
+    """Generate the Isaac Sim digital-twin scene package (visual only, no hardware).
+
+    Writes scene_config.json + a standalone build_isaac_scene.py + README.md.
+    Needs neither Isaac Sim nor a GPU — the USD build itself runs later, inside
+    the Isaac Sim container (see yam-print-isaac-cloud-commands).
+    """
+    from terafold.yam.isaac_scene import generate_isaac_scene
+
+    res = generate_isaac_scene(out, config_path=config)
+    if res["status"] != "ok":
+        _err(f"{res['status']}: {res.get('message', '')}")
+        raise typer.Exit(1)
+    _ok(f"Isaac scene package written: {res['out']}")
+    for f in res["files"]:
+        _echo(f"  {res['out']}/{f}")
+    _echo(f"  cameras (order): {res['camera_order']}   arms: {res['arms']}")
+    _echo("  visual digital twin only — no hardware, no cloth policy training")
+    _echo("  next: terafold yam-print-isaac-cloud-commands")
+
+
+@app.command("yam-print-isaac-cloud-commands")
+def yam_print_isaac_cloud_commands_cmd(
+    scene_dir: str = typer.Option("sim/yam_dual_towel_scene",
+                                  help="Scene package dir to mount into the container."),
+):
+    """Print the exact docker/Isaac Sim container commands for a cloud GPU."""
+    from terafold.yam.isaac_scene import isaac_cloud_commands
+
+    for line in isaac_cloud_commands(scene_dir=scene_dir):
+        _echo(line)
+
+
+@app.command("yam-shadow-policy")
+def yam_shadow_policy_cmd(
+    episode: str = typer.Option(..., help="Recorded episode dir (see yam-create-dummy-episode)."),
+    model: str = typer.Option("allenai/MolmoAct2-BimanualYAM", help="HF model id or local path."),
+    dtype: str = typer.Option("bfloat16", help="bfloat16 (GPU) | float32 (CPU debug)."),
+    out: str = typer.Option("runs/yam_shadow_smoke", help="Output dir for JSON (+ optional .rrd)."),
+    first_frame_only: bool = typer.Option(False, "--first-frame-only",
+                                          help="Smoke mode: predict only frame 0."),
+    max_frames: Optional[int] = typer.Option(None, help="Cap frames processed."),
+    max_new_tokens: int = typer.Option(256, help="Generation budget per frame."),
+    mock: bool = typer.Option(False, "--mock", help="Built-in mock adapter — no torch/GPU needed."),
+    no_rerun: bool = typer.Option(False, "--no-rerun", help="Skip Rerun logging even if installed."),
+    revision: Optional[str] = typer.Option(None, help="Pin the HF repo revision/commit "
+                                           "(recommended: trust_remote_code runs hub code)."),
+):
+    """Replay a recorded episode through the policy in SHADOW mode (predict + compare only).
+
+    Predictions are saved and diffed against the recorded actions; no command
+    ever reaches hardware (execution does not exist in this sprint).
+    """
+    from terafold.yam.shadow import run_shadow_policy
+
+    res = run_shadow_policy(episode, model_name=model, dtype=dtype, out=out,
+                            first_frame_only=first_frame_only, max_frames=max_frames,
+                            mock=mock, use_rerun=not no_rerun, revision=revision,
+                            max_new_tokens=max_new_tokens, log=_echo)
+    if res["status"] == "deps_missing":
+        _err("Missing dependencies for MolmoAct2 inference.")
+        for line in res["instructions"]:
+            _echo(f"  {line}")
+        if res.get("hint"):
+            _echo(f"  hint: {res['hint']}")
+        raise typer.Exit(2)
+    if res["status"] != "ok":
+        _err(f"{res['status']}: {res.get('message', '')}")
+        if res.get("hint"):
+            _echo(f"  hint: {res['hint']}")
+        raise typer.Exit(1)
+    _ok(f"Shadow run OK: {res['frames_predicted']} frames predicted, "
+        f"{res['frames_compared']} compared -> {res['out']}")
+    _echo(f"  {res['rerun']}")
+    _echo("  hardware_commanded: false (shadow mode — nothing was sent to the YAMs)")
 
 
 def main() -> None:  # console-script friendly

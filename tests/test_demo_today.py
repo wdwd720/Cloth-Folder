@@ -62,14 +62,42 @@ def test_real_motion_refused_without_requirements(tmp_path):
     assert any("calibrat" in m for m in res["missing"])
 
 
-def test_camera_fallback_to_mock(tmp_path):
-    # No cv2 / no webcam -> falls back to the marker-rendering mock camera.
+def test_camera_fallback_to_mock(tmp_path, monkeypatch):
+    # Deterministic: force the isolated camera probe to report "unavailable" so the
+    # demo falls back to the marker-rendering mock camera REGARDLESS of whether this
+    # machine actually has a webcam. (On a Mac with a camera, an un-mocked probe would
+    # open it and return "opencv".) This does not weaken any real safety behavior —
+    # only the probe result is mocked; the fallback logic under test is unchanged.
+    import terafold.camera.discovery as discovery
+
+    def _fail_probe(index, out, warmup, min_blur, timeout):
+        return discovery.CameraScan(index=index, opened=False, error="forced-unavailable (test)")
+
+    monkeypatch.setattr(discovery, "_probe_isolated", _fail_probe)
     res = run_demo_today(
         task_path=TASK, camera="opencv", camera_index=0, robot="mock", mode="markers",
         dry_run=True, out=str(tmp_path / "ep"),
     )
     assert res["status"] == "ok"
     assert res["camera"].startswith("mock")
+
+
+def test_camera_real_opencv_label_when_available(tmp_path, monkeypatch):
+    # Complementary, hardware-free check that the "opencv" label is reported when the
+    # camera build returns a real-camera tuple (the fallback's mirror image). We stub
+    # _build_camera to the opencv branch and assert the reported camera label only.
+    import terafold.demo as demo
+
+    monkeypatch.setattr(
+        demo, "_build_camera",
+        lambda camera, camera_index, mode, log: (demo._mock_cam(mode, "opencv")[0], "opencv"),
+    )
+    res = run_demo_today(
+        task_path=TASK, camera="opencv", camera_index=0, robot="mock", mode="markers",
+        dry_run=True, out=str(tmp_path / "ep2"),
+    )
+    assert res["status"] == "ok"
+    assert res["camera"] == "opencv"
 
 
 def test_stop_file_aborts(tmp_path, monkeypatch):

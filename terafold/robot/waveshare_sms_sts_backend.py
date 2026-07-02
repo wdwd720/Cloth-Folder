@@ -152,11 +152,50 @@ class WaveshareSmsStsBackend:
         except Exception:
             return None
 
+    def read_pos_speed(self, servo_id: int):
+        """Return ``(position, speed)`` raw units, or ``None`` if the read failed.
+
+        This is the named interface from the SDK (``ReadPosSpeed``); it exposes the
+        speed too, which :mod:`characterization` uses to detect 'settled'.
+        """
+        if self._packet is None:
+            return None
+        comm_ok = getattr(self._sdk, "COMM_SUCCESS", 0)
+        try:
+            pos, speed, comm, _err = self._packet.ReadPosSpeed(servo_id)
+            return (int(pos), int(speed)) if comm == comm_ok else None
+        except Exception:
+            return None
+
     def read_all_positions(self, ids: Optional[List[int]] = None) -> Dict[int, Optional[int]]:
         ids = ids or self.active_ids
         return {i: self.read_position(i) for i in ids}
 
+    # Named aliases matching the required backend interface --------------
+    def read_all(self, ids: Optional[List[int]] = None) -> Dict[int, Optional[int]]:
+        """Alias of :meth:`read_all_positions` (the spec's interface name)."""
+        return self.read_all_positions(ids)
+
+    def ping_many(self, ids: Optional[List[int]] = None) -> Dict[int, bool]:
+        """Alias of :meth:`ping` over many IDs."""
+        return self.ping(ids)
+
+    def available(self) -> bool:
+        """True if the vendor SDK is importable (a backend can be attempted)."""
+        return self.sdk_available
+
+    def probe_protocol(self, ids: Optional[List[int]] = None) -> Dict[str, Any]:
+        """Read-only protocol probe. Alias of :meth:`confirm` (never writes)."""
+        if ids is not None:
+            self.active_ids = list(ids)
+        return self.confirm()
+
     # -- protocol-gated writes -----------------------------------------
+    def write_pos_ex(self, servo_id: int, target: int, speed: Optional[int] = None,
+                     acc: Optional[int] = None) -> bool:
+        """Alias of :meth:`write_position` (the SDK / spec interface name)."""
+        return self.write_position(servo_id, target, speed=speed, acc=acc)
+
     def write_position(self, servo_id: int, target: int, speed: Optional[int] = None,
                        acc: Optional[int] = None) -> bool:
         if not self._confirmed:
@@ -227,6 +266,28 @@ class WaveshareSmsStsBackend:
                 self.logger.log("protocol_confirm", report)
             except Exception:
                 pass
+        return report
+
+    # -- safe stop / close ----------------------------------------------
+    def safe_stop(self, ids: Optional[List[int]] = None) -> Dict[str, Any]:
+        """Best-effort safe stop: disable torque on the confirmed servos.
+
+        Does NOT close the port (use :meth:`close_safely` for that). Returns a
+        small report so callers can log what was attempted.
+        """
+        attempted = self._packet is not None and self._confirmed
+        if attempted:
+            self.torque_off(ids)
+        return {"torque_off_attempted": attempted, "ids": list(ids or self.active_ids)}
+
+    def close_safely(self, ids: Optional[List[int]] = None) -> Dict[str, Any]:
+        """Safe-stop then close the port. Always closes, even on error."""
+        report = {"torque_off_attempted": False, "port_closed": False}
+        try:
+            report.update(self.safe_stop(ids))
+        finally:
+            self.close()
+            report["port_closed"] = True
         return report
 
     # -- emergency stop -------------------------------------------------
