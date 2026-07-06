@@ -1,0 +1,25 @@
+{
+  "status": "CLEAN_TOWEL_V8_CONTACT_SANITY_DONE",
+  "clean_towel_can_be_moved_by_primitive_collider": false,
+  "baseline_primitive_contact_success": false,
+  "contact_parameters_were_required": false,
+  "contact_offsets_physically_plausible_setting_found": false,
+  "best_contact_setting": null,
+  "so101_proxy_fingertip_colliders_helped": false,
+  "proxy_actual_touch_achieved": true,
+  "proxy_moves_towel": false,
+  "proxy_width_reduction_success": false,
+  "bottleneck_assessment": "clean_towel_cloth_collision_setup_or_primitive_contact_parameters",
+  "ready_for_v9_policy_training": false,
+  "ready_for_v9_policy_training_scope": "not ready",
+  "true_robot_contact_folding_evidence_exists": false,
+  "true_robot_contact_folding_evidence_basis": "V8 uses primitive/proxy colliders for isolated contact sanity and does not prove autonomous folding with the original SO-101 jaw geometry.",
+  "do_not_train_in_v8": true,
+  "paths": {
+    "primitive_contact_summary": "/workspace/leisaac/tera_checkpoints/clean_towel_v8_contact_sanity/primitive_contact_summary.json",
+    "contact_offsets_sweep_summary": "/workspace/leisaac/tera_checkpoints/clean_towel_v8_contact_sanity/contact_offsets_sweep_summary.json",
+    "so101_proxy_fingertip_summary": "/workspace/leisaac/tera_checkpoints/clean_towel_v8_contact_sanity/so101_proxy_fingertip_summary.json",
+    "status_json": "/workspace/leisaac/tera_checkpoints/clean_towel_v8_contact_sanity/STATUS.json"
+  },
+  "honest_note": "V8 is isolated contact sanity only. No policy training or autonomous folding claim is made."
+}
