@@ -1,0 +1,63 @@
+{
+  "status": "CLEAN_TOWEL_V7_CONTACT_MECHANICS_DONE",
+  "jaw_collision_bodies_exist": true,
+  "finger_jaw_body_names_identified": {
+    "left": [
+      "gripper",
+      "jaw"
+    ],
+    "right": [
+      "gripper",
+      "jaw"
+    ]
+  },
+  "gripper_open_close_mapping_works": true,
+  "jaw_gap_changes_with_action": true,
+  "open_value": 0.8999999761581421,
+  "close_value": 0.0,
+  "actual_touch_was_achieved": false,
+  "pure_contact_moved_towel": false,
+  "best_pure_contact_edge_displacement": 0.0007837546872906387,
+  "best_pure_contact_width": 0.6800001263618469,
+  "pure_contact_width_reduction_success": false,
+  "contact_parameter_sweep_helped": false,
+  "parameter_sweep_moves_towel": true,
+  "parameter_sweep_width_reduction_success": true,
+  "parameter_sweep_actual_touch_achieved": false,
+  "parameter_sweep_touch_confirmed_moves_towel": false,
+  "parameter_sweep_touch_confirmed_width_reduction_success": false,
+  "parameter_sweep_contact_evidence_success": false,
+  "parameter_sweep_invalid_result_count": 3,
+  "parameter_sweep_note": "Raw width/displacement changes from contact parameter sweeps are not counted as robot-contact evidence unless the nearest-jaw metric also confirms actual touch.",
+  "best_contact_params": {
+    "param_trial_id": 34,
+    "cloth_contact_offset": 0.015,
+    "rest_offset": 0.004,
+    "particle_radius": 0.006,
+    "jaw_contact_offset": 0.006,
+    "static_friction": 0.8,
+    "dynamic_friction": 0.6,
+    "soft_fingertip_proxy_radius": null,
+    "soft_fingertip_proxy_note": "not used; this sweep only uses accessible USD/PhysX material and offset attributes"
+  },
+  "best_touch_confirmed_contact_params": null,
+  "local_attachment_was_run": true,
+  "local_attachment_required": false,
+  "minimum_local_attachment_strength_for_best_width_under_0_50": null,
+  "minimum_local_attachment_radius_for_best_width_under_0_50": null,
+  "true_robot_contact_folding_evidence_exists": false,
+  "ready_for_v8_policy_training": false,
+  "ready_for_v8_policy_training_basis": "true only if pure robot contact or runtime contact-parameter pure contact both move towel and reduce width; local attachment evidence alone is not true robot-contact folding evidence",
+  "do_not_train_in_v7": true,
+  "paths": {
+    "gripper_collision_inspection": "/workspace/leisaac/tera_checkpoints/clean_towel_v7_contact_mechanics/gripper_collision_inspection_summary.json",
+    "gripper_open_close_mapping": "/workspace/leisaac/tera_checkpoints/clean_towel_v7_contact_mechanics/gripper_open_close_mapping_summary.json",
+    "edge_pinch_drag_sweep_summary": "/workspace/leisaac/tera_checkpoints/clean_towel_v7_contact_mechanics/edge_pinch_drag_sweep_summary.json",
+    "edge_pinch_drag_sweep_results": "/workspace/leisaac/tera_checkpoints/clean_towel_v7_contact_mechanics/edge_pinch_drag_sweep_results.json",
+    "contact_parameter_sweep_summary": "/workspace/leisaac/tera_checkpoints/clean_towel_v7_contact_mechanics/contact_parameter_sweep_summary.json",
+    "contact_parameter_sweep_results": "/workspace/leisaac/tera_checkpoints/clean_towel_v7_contact_mechanics/contact_parameter_sweep_results.json",
+    "local_gripper_attachment_summary": "/workspace/leisaac/tera_checkpoints/clean_towel_v7_contact_mechanics/local_gripper_attachment_summary.json",
+    "status_json": "/workspace/leisaac/tera_checkpoints/clean_towel_v7_contact_mechanics/STATUS.json"
+  },
+  "honest_note": "V7 is contact-mechanics debugging only. Local gripper attachment is labeled assisted and does not count as true contact."
+}
