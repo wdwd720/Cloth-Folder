@@ -17,10 +17,7 @@ htmlcov/
 venv/
 env/
 
-# TeraFold runtime artifacts (large / regenerable — never commit)
-# /data holds raw/generated datasets (GBs); GitHub caps files at 100 MB anyway.
-# (anchored to repo root so terafold/data — a Python package — stays tracked)
-/data/
+# TeraFold runtime artifacts (regenerable — never commit)
 runs/
 *.pt
 *.ckpt
@@ -41,3 +38,23 @@ runs/
 
 # Vendored SDKs / virtualenvs (machine-specific; loaded by local path)
 vendor/
+
+# ---- TeraFold runtime artifacts / datasets ----
+/data/
+runs/
+tera_checkpoints/
+*.pt
+*.pth
+*.ckpt
+*.safetensors
+*.mp4
+*.usd
+*.usda
+*.usdc
+*.rrd
+*.npz
+*.tar.gz
+*.zip
+.env
+.env.*
+!.env.example
