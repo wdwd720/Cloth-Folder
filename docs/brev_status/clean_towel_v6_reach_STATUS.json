@@ -1,0 +1,54 @@
+{
+  "status": "CLEAN_TOWEL_V6_REACH_CONTACT_DONE",
+  "v5_invalidated_by_jaw_distance": true,
+  "v5_best_nearest_jaw_to_selected_edge_m": 0.4063414931297302,
+  "v5_invalidated_threshold_m": 0.05,
+  "current_towel_placement_reachable": false,
+  "current_towel_placement_strong_reachable": false,
+  "current_best_jaw_to_edge_center_distance_m": 0.357087105512619,
+  "best_jaw_to_edge_center_distances_by_arm_edge_m": {
+    "left": {
+      "left": 0.38007789850234985,
+      "right": 0.8911827802658081,
+      "front": 0.5242457985877991,
+      "back": 0.7364833950996399
+    },
+    "right": {
+      "left": 0.8592193126678467,
+      "right": 0.357087105512619,
+      "front": 0.4937651455402374,
+      "back": 0.6941637992858887
+    }
+  },
+  "recommended_towel_placement_needed": true,
+  "recommended_towel_center": [
+    0.20217525959014893,
+    -0.5512138605117798,
+    0.0030000002589076757
+  ],
+  "recommended_towel_move_delta_m": [
+    0.20217525959014893,
+    -0.5512138605117798,
+    0.0
+  ],
+  "recommended_best_jaw_to_edge_center_distance_m": 0.03128250315785408,
+  "contact_after_reach_fix_status": "SO101_CLEAN_TOWEL_CONTACT_AFTER_REACH_FIX_V6_DONE",
+  "actual_contact_moved_towel": false,
+  "near_contact_achieved": true,
+  "nearest_jaw_to_selected_edge_m": 0.02997392974793911,
+  "selected_edge_particle_displacement": 0.005506882444024086,
+  "contact_width_reduction_success": false,
+  "strong_contact_width_reduction_success": false,
+  "ready_for_v7_contact_policy_training": false,
+  "ready_for_v7_contact_policy_training_basis": "true only when near_contact_achieved and contact_moves_towel are both true; no autonomous folding is claimed from V6",
+  "do_not_train_in_v6": true,
+  "paths": {
+    "geometry_summary": "/workspace/leisaac/tera_checkpoints/clean_towel_v6_reach/geometry_summary.json",
+    "reach_search_results": "/workspace/leisaac/tera_checkpoints/clean_towel_v6_reach/reach_search_results.json",
+    "reach_search_npz": "/workspace/leisaac/tera_checkpoints/clean_towel_v6_reach/reach_search_results.npz",
+    "placement_search_summary": "/workspace/leisaac/tera_checkpoints/clean_towel_v6_reach/towel_placement_search_summary.json",
+    "contact_after_reach_fix_summary": "/workspace/leisaac/tera_checkpoints/clean_towel_v6_reach/contact_after_reach_fix_summary.json",
+    "status_json": "/workspace/leisaac/tera_checkpoints/clean_towel_v6_reach/STATUS.json"
+  },
+  "honest_note": "V6 is geometry, reachability, towel-placement, and contact validation only. Do not claim contact unless nearest-jaw and towel-motion metrics pass, and do not claim autonomous folding unless width metrics pass."
+}
