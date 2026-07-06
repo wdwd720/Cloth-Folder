@@ -1,0 +1,31 @@
+{
+  "status": "SO101_CLEAN_TOWEL_V1_READY",
+  "ready_for_v4_training": true,
+  "what_worked": [
+    "SO-101 left/right arms, 12-D action control, and clean towel v2 particles loaded together.",
+    "Assisted particle-space fold reduced clean towel width below the requested threshold."
+  ],
+  "what_failed": [],
+  "paths": {
+    "clean_towel_usd_v2": "/workspace/leisaac/tera_checkpoints/clean_towel_v2/clean_rect_towel_usd_v2.usda",
+    "smoke_script": "/workspace/leisaac/scripts/tera/test_so101_clean_towel_scene_v1.py",
+    "assisted_fold_script": "/workspace/leisaac/scripts/tera/run_so101_clean_towel_assisted_fold_v1.py",
+    "helper_script": "/workspace/leisaac/scripts/tera/so101_clean_towel_scene_utils_v1.py",
+    "output_dir": "/workspace/leisaac/tera_checkpoints/so101_clean_towel_v1",
+    "smoke_summary": "/workspace/leisaac/tera_checkpoints/so101_clean_towel_v1/test_so101_clean_towel_scene_v1_summary.json",
+    "assisted_summary": "/workspace/leisaac/tera_checkpoints/so101_clean_towel_v1/assisted_fold_summary.json",
+    "status_json": "/workspace/leisaac/tera_checkpoints/so101_clean_towel_v1/STATUS.json"
+  },
+  "commands_run": [
+    "/workspace/isaaclab/_isaac_sim/python.sh -m py_compile scripts/tera/so101_clean_towel_scene_utils_v1.py scripts/tera/test_so101_clean_towel_scene_v1.py scripts/tera/run_so101_clean_towel_assisted_fold_v1.py",
+    "/workspace/isaaclab/_isaac_sim/python.sh scripts/tera/test_so101_clean_towel_scene_v1.py",
+    "/workspace/isaaclab/_isaac_sim/python.sh scripts/tera/run_so101_clean_towel_assisted_fold_v1.py"
+  ],
+  "smoke_summary_status": "SO101_CLEAN_TOWEL_SCENE_V1_TEST_OK",
+  "assisted_summary_status": "SO101_CLEAN_TOWEL_ASSISTED_FOLD_V1_OK",
+  "scene_ready_basis": {
+    "smoke_passed": true,
+    "assisted_fold_passed": true,
+    "assisted_note": "The fold primitive directly assists the real clean towel particle state inside the SO-101 scene; it is not a learned policy."
+  }
+}

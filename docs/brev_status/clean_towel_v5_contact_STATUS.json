@@ -1,0 +1,26 @@
+{
+  "status": "CLEAN_TOWEL_V5_CONTACT_DONE",
+  "pure_robot_contact_moved_towel": false,
+  "pure_robot_contact_fold_candidate": false,
+  "pure_robot_contact_replay_success": false,
+  "best_pure_contact_width": 0.6800000071525574,
+  "gripper_attachment_required": true,
+  "minimum_useful_attachment_strength": 0.1,
+  "ready_for_v5_policy_training": true,
+  "has_true_robot_contact_folding_evidence": false,
+  "has_gripper_attachment_assisted_model": true,
+  "commands_run": [
+    "/workspace/isaaclab/_isaac_sim/python.sh -m py_compile scripts/tera/clean_towel_v5_contact_common.py scripts/tera/test_clean_towel_gripper_contact_sweep_v5.py scripts/tera/run_clean_towel_robot_contact_fold_best_v5.py scripts/tera/run_clean_towel_gripper_attachment_fold_v5.py",
+    "/workspace/isaaclab/_isaac_sim/python.sh scripts/tera/test_clean_towel_gripper_contact_sweep_v5.py",
+    "/workspace/isaaclab/_isaac_sim/python.sh scripts/tera/run_clean_towel_robot_contact_fold_best_v5.py",
+    "/workspace/isaaclab/_isaac_sim/python.sh scripts/tera/run_clean_towel_gripper_attachment_fold_v5.py"
+  ],
+  "paths": {
+    "contact_sweep_json": "/workspace/leisaac/tera_checkpoints/clean_towel_v5_contact/gripper_contact_sweep_results.json",
+    "contact_sweep_npz": "/workspace/leisaac/tera_checkpoints/clean_towel_v5_contact/gripper_contact_sweep_results.npz",
+    "contact_replay_summary": "/workspace/leisaac/tera_checkpoints/clean_towel_v5_contact/robot_contact_fold_best_summary.json",
+    "attachment_summary": "/workspace/leisaac/tera_checkpoints/clean_towel_v5_contact/gripper_attachment_curriculum_summary.json",
+    "status_json": "/workspace/leisaac/tera_checkpoints/clean_towel_v5_contact/STATUS.json"
+  },
+  "honest_note": "Pure robot-contact success is only claimed from the no-attachment replay. The gripper attachment curriculum directly constrains a local towel edge band and is assisted manipulation."
+}

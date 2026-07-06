@@ -1,0 +1,31 @@
+{
+  "status": "CLEAN_TOWEL_V4_PIPELINE_DONE",
+  "train_status": "CLEAN_TOWEL_POLICY_V4_TRAIN_OK",
+  "no_assist_eval_status": "CLEAN_TOWEL_POLICY_V4_NO_ASSIST_EVAL_DONE",
+  "with_stop_eval_status": "CLEAN_TOWEL_POLICY_V4_WITH_STOP_EVAL_DONE",
+  "assist_curriculum_status": "CLEAN_TOWEL_V4_ASSIST_CURRICULUM_DONE",
+  "ready_for_more_training": true,
+  "has_true_robot_contact_folding_evidence": false,
+  "has_strong_true_robot_contact_folding_evidence": false,
+  "still_requires_assist_for_strong_fold": true,
+  "minimum_assist_ratio_with_best_width_under_0_50": 0.25,
+  "v4_policy_basis": "supervised_policy_fit_to_synthetic_joint_targets_from_particle_space_assisted_fold_progress",
+  "contains_robot_contact_demonstrations": false,
+  "commands_run": [
+    "/workspace/isaaclab/_isaac_sim/python.sh -m py_compile scripts/tera/clean_towel_v4_common.py scripts/tera/train_clean_towel_policy_v4.py scripts/tera/eval_clean_towel_policy_v4_no_assist.py scripts/tera/eval_clean_towel_policy_v4_with_stop.py scripts/tera/run_clean_towel_v4_assist_curriculum.py",
+    "/workspace/isaaclab/_isaac_sim/python.sh scripts/tera/train_clean_towel_policy_v4.py",
+    "/workspace/isaaclab/_isaac_sim/python.sh scripts/tera/eval_clean_towel_policy_v4_no_assist.py",
+    "/workspace/isaaclab/_isaac_sim/python.sh scripts/tera/eval_clean_towel_policy_v4_with_stop.py",
+    "/workspace/isaaclab/_isaac_sim/python.sh scripts/tera/run_clean_towel_v4_assist_curriculum.py"
+  ],
+  "paths": {
+    "policy": "/workspace/leisaac/tera_checkpoints/clean_towel_v4/clean_towel_policy_v4.pt",
+    "dataset": "/workspace/leisaac/tera_checkpoints/clean_towel_v4/clean_towel_policy_v4_dataset.npz",
+    "train_summary": "/workspace/leisaac/tera_checkpoints/clean_towel_v4/train_clean_towel_policy_v4_summary.json",
+    "no_assist_summary": "/workspace/leisaac/tera_checkpoints/clean_towel_v4/eval_no_assist_summary.json",
+    "with_stop_summary": "/workspace/leisaac/tera_checkpoints/clean_towel_v4/eval_with_stop_summary.json",
+    "curriculum_summary": "/workspace/leisaac/tera_checkpoints/clean_towel_v4/assist_curriculum_summary.json",
+    "status_json": "/workspace/leisaac/tera_checkpoints/clean_towel_v4/STATUS.json"
+  },
+  "honest_note": "Autonomous success is only claimed if no-assist evaluation proves it. The V4 training labels are synthetic and derived from the particle-space assisted fold, not robot-contact demonstrations."
+}
