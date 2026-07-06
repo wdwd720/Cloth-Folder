@@ -1,0 +1,20 @@
+embodiment: dual_so101
+action_dim: 12
+
+cloth:
+  name: clean_rect_towel_v2
+  towel_width_x_m: 0.68
+  towel_height_y_m: 0.38
+  source: brev_isaac_verified
+
+status:
+  clean_towel_v2_verified: true
+  so101_scene_verified_on_brev: true
+  particle_space_assisted_fold_verified: true
+  pure_robot_contact_folding_verified: false
+
+notes:
+  - "Dual SO-101 action_dim 12 is canonical for cloth-folding integration."
+  - "YAM/MolmoAct2 remains separate shadow-mode research lane."
+  - "Brev proved particle-space assisted folding, not autonomous robot-contact folding."
+  - "Next required milestone is V6 reachability and towel placement diagnostics."
