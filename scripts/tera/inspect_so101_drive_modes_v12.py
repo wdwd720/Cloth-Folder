@@ -29,6 +29,12 @@ from typing import Any
 
 import numpy as np
 
+# Install RL import stubs BEFORE any IsaacLab/SimulationApp import: on Isaac Sim
+# 4.5.0 the isaaclab_rl extension auto-loads and imports rl_games/rsl_rl/sb3/skrl
+# (not installed -> fatal). This import-only shim makes those imports succeed so
+# SimulationApp starts. RL_STUBS_FOR_ISAACLAB_IMPORT_ONLY; never used for training.
+import isaaclab_rl_stubs_v12  # noqa: F401,E402  (side-effect: installs meta_path stubs)
+
 from isaaclab.app import AppLauncher
 
 import test_clean_towel_primitive_contact_v8 as v8  # noqa: F401  (ensures deps import)

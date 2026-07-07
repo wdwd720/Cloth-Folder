@@ -24,6 +24,12 @@ from typing import Any
 
 import numpy as np
 
+# Install RL import stubs BEFORE any IsaacLab/SimulationApp import: on Isaac Sim
+# 4.5.0 the isaaclab_rl extension auto-loads and imports rl_games/rsl_rl/sb3/skrl
+# (not installed -> fatal). This import-only shim makes those imports succeed so
+# SimulationApp starts. RL_STUBS_FOR_ISAACLAB_IMPORT_ONLY; never used for training.
+import isaaclab_rl_stubs_v12  # noqa: F401,E402  (side-effect: installs meta_path stubs)
+
 from isaaclab.app import AppLauncher
 
 import clean_towel_contact_v11_common as c11
@@ -36,7 +42,6 @@ from clean_towel_v4_common import (
     synthetic_action,
 )
 from clean_towel_v5_contact_common import edge_center_displacement
-from inspect_so101_gripper_collision_v7 import recommended_towel_translation
 from so101_clean_towel_scene_utils_v1 import (
     CLEAN_TOWEL_USD_PATH,
     command_run_string,
@@ -46,7 +51,7 @@ from so101_clean_towel_scene_utils_v1 import (
     size_metrics,
     write_json,
 )
-from test_so101_fingertip_physics_drive_v12 import _ProxyScene, PROXY_PATH
+from test_so101_fingertip_physics_drive_v12 import _ProxyScene, PROXY_PATH, STABLE_TOWEL_TRANSLATION
 
 V12_DIR = Path("/workspace/leisaac/tera_checkpoints/clean_towel_v12")
 DEMO_DIR = V12_DIR / "demos"
@@ -69,8 +74,20 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--drag_distance", type=float, default=0.28)
     parser.add_argument("--drag_height_delta", type=float, default=0.0)
     parser.add_argument("--outside_margin", type=float, default=0.05)
-    parser.add_argument("--proxy_contact_offset", type=float, default=0.012)
-    parser.add_argument("--proxy_rest_offset", type=float, default=0.0)
+    # Primitive/cloth contact params consumed by v8.default_primitive_params
+    # (must all exist on args; v8 defaults).
+    parser.add_argument("--primitive_contact_offset", type=float, default=0.012)
+    parser.add_argument("--primitive_rest_offset", type=float, default=0.0)
+    parser.add_argument("--cloth_contact_offset", type=float, default=0.005)
+    parser.add_argument("--cloth_rest_offset", type=float, default=0.003)
+    parser.add_argument("--particle_radius", type=float, default=0.005)
+    parser.add_argument("--static_friction", type=float, default=1.2)
+    parser.add_argument("--dynamic_friction", type=float, default=1.0)
+    parser.add_argument("--approach_steps", type=int, default=50)
+    parser.add_argument("--hold_contact_steps", type=int, default=12)
+    parser.add_argument("--drag_steps", type=int, default=80)
+    parser.add_argument("--settle_after_steps", type=int, default=20)
+    parser.add_argument("--settle_before_steps", type=int, default=4)
     AppLauncher.add_app_launcher_args(parser)
     args = parser.parse_args()
     force_headless_no_cameras(args)
@@ -92,22 +109,24 @@ def main() -> None:
         "episodes": [],
     }
     try:
-        from isaacsim.core.utils.stage import get_current_stage, update_stage
+        from isaacsim.core.utils.stage import get_current_stage
+
+        # Centered stable towel + proxy spawned BEFORE the single sim.reset() (see
+        # test_so101_fingertip_physics_drive_v12: STABLE_TOWEL_TRANSLATION and the
+        # pre_reset_spawn hook). The V6 arm-relative center crashes the GPU solve
+        # and is unavailable on Modal; a second reset after adding the proxy also
+        # crashes, so we match the proven single-reset V11 build order.
+        def _spawn_proxy() -> None:
+            v8.spawn_kinematic_sphere(
+                PROXY_PATH, radius=float(args.primitive_radius),
+                contact_offset=float(args.primitive_contact_offset), rest_offset=float(args.primitive_rest_offset),
+                static_friction=1.6, dynamic_friction=1.2, translation=(1.25, 0.0, 0.30),
+            )
 
         scene = create_standalone_so101_clean_towel_scene(
-            args, clean_usd_path=args.usd_path, towel_translation=recommended_towel_translation()
+            args, clean_usd_path=args.usd_path, towel_translation=STABLE_TOWEL_TRANSLATION,
+            pre_reset_spawn=_spawn_proxy,
         )
-        scene.step_zero(int(args.settle_initial_steps))
-        v8.spawn_kinematic_sphere(
-            PROXY_PATH, radius=float(args.primitive_radius),
-            contact_offset=float(args.proxy_contact_offset), rest_offset=float(args.proxy_rest_offset),
-            static_friction=1.6, dynamic_friction=1.2, translation=(1.25, 0.0, 0.30),
-        )
-        update_stage()
-        scene.sim.reset()
-        scene.left_arm.update(scene.sim.get_physics_dt())
-        scene.right_arm.update(scene.sim.get_physics_dt())
-        scene.clean_towel = initialize_clean_towel_handle_for_sim(scene.sim, scene.clean_towel.root_path)
         scene.step_zero(int(args.settle_initial_steps))
 
         proxy_scene = _ProxyScene(sim=scene.sim, clean_towel=scene.clean_towel,

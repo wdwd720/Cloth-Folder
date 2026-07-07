@@ -362,7 +362,17 @@ def create_standalone_so101_clean_towel_scene(
     args: Any,
     clean_usd_path: Path = CLEAN_TOWEL_USD_PATH,
     towel_translation: tuple[float, float, float] = (0.0, 0.0, 0.02),
+    pre_reset_spawn=None,
 ) -> StandaloneSo101CleanTowelScene:
+    """Build the standalone SO-101 + clean-towel scene.
+
+    ``pre_reset_spawn`` (optional, no-arg callable) is invoked AFTER the arms and
+    towel are added but BEFORE the single ``sim.reset()``. Use it to spawn extra
+    bodies (e.g. a contact proxy) so every rigid body is present when the GPU
+    physics views are first initialized. Adding a rigid body AFTER reset and then
+    re-resetting crashes the GPU particle+articulation solve on Isaac Sim 4.5;
+    this hook preserves the proven single-reset build order (cf. V11 build_scene).
+    """
     if not clean_usd_path.exists():
         raise FileNotFoundError(f"Missing clean towel USD: {clean_usd_path}")
 
@@ -396,6 +406,9 @@ def create_standalone_so101_clean_towel_scene(
     clean_root_path = f"/World/Scene/{CLEAN_TOWEL_ROOT_NAME}"
     reference_prim = add_reference_to_stage(str(clean_usd_path), clean_root_path)
     UsdGeom.Xformable(reference_prim).AddTranslateOp().Set(Gf.Vec3d(*towel_translation))
+    # Spawn extra bodies (e.g. contact proxy) BEFORE the single reset (see docstring).
+    if pre_reset_spawn is not None:
+        pre_reset_spawn()
     update_stage()
 
     sim.reset()
