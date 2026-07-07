@@ -32,12 +32,38 @@ remaining data blocker is that no robot-contact demonstration dataset exists,
 and real robot-contact policy training requires proven cloth/rigid contact
 transfer first.
 
+### Track A — Isaac on Modal (6.0.1 infra PROVEN; particle-cloth version blocker found)
+
+`modal_apps/terafold_modal_repo_isaac_smoke.py` (v4) ran on Modal L40S with
+Isaac Sim `6.0.1` and proved the Modal Isaac *infrastructure*:
+- repo unpack + py_compile of all tera scripts: OK
+- IsaacLab (`main`) clone + `from isaaclab.app import AppLauncher`: OK
+- `torch` installed into `/isaac-sim/python.sh` (the v3 blocker): OK,
+  torch `2.12.1+cu130`, `cuda=true` (fixes v3 ModuleNotFoundError: torch)
+- `create_clean_rect_towel_usd_v2.py` ran (writes a USDA with PhysX schema)
+
+BUT the actual cloth simulation cannot run on 6.0.1:
+- `test_clean_rect_towel_usd_v2.py` failed with
+  `NotImplementedError: SingleClothPrim is no longer available. Omniverse PhysX
+  removed the deprecated particle-based cloth features. Please use the new
+  deformable body API in isaacsim.core.experimental instead.`
+- The Tera clean-towel stack (V2..V8) is built on
+  `isaacsim.core.prims.SingleClothPrim` + `PhysxSchema.PhysxParticleClothAPI`
+  (the Isaac Sim 4.5 particle-cloth API), which 6.0.1 removed.
+- `test_clean_towel_primitive_contact_v8.py` returned exit 0 but its own JSON
+  reported an internal failure (missing `flatdict`); that is a red herring next
+  to the removed cloth API.
+
+Conclusion: to run the real cloth/contact scripts on Modal we must match the
+Isaac Sim version Brev used. See `modal_apps/terafold_modal_isaac45_cloth_smoke.py`
+(Isaac Sim 4.5.0 + IsaacLab v2.0.2).
+
 ## Not proven yet
 
-Isaac Sim headless on Modal has passed the first smoke test.
-Isaac Lab / LeIsaac repo scripts on Modal have not been proven yet.
+Particle-cloth simulation on Modal (Isaac Sim 4.5.0) is being verified.
 Autonomous robot-contact towel folding has not been proven.
-The clean towel rigid-contact issue is not solved.
+The clean towel rigid-contact issue is not solved (and, on 6.0.1, the cloth
+primitive itself does not exist).
 
 ## Modal roles
 
