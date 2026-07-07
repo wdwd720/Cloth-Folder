@@ -81,10 +81,30 @@ and steps under gravity only, measuring particle displacement.
 **Conclusion:** the particle solver is alive and the cloth is NOT frozen or
 pinned. The V8 "exactly 0.0 displacement" is therefore not a dead solver — it is
 that a kinematic collider touching the resting cloth imparts no lateral impulse
-to the particles. The blocker is precisely **collider→particle contact
-transfer**, which is the correct target for V10 (e.g. a dynamic velocity-driven
-rigid pusher, or contact/rest-offset tuning so the collider penetrates the
-particle contact band).
+to the particles.
+
+### V9 parameter dump → concrete authoring bug (towel is 2691× too heavy)
+
+The V9 probe also dumped the PhysX particle-system + cloth attributes. Two facts
+explain the zero contact transfer:
+
+1. **Towel mass bug.** The cloth mesh reports `physics:mass = 26.91 kg` for a
+   towel. `create_clean_rect_towel_usd_v2.py` defaults `--mass 0.01` (intended
+   ~total) but authors it as `MassAPI.CreateDensityAttr().Set(args.mass)` — i.e.
+   density `0.01` applied **per particle**. With 2691 particles that yields
+   `2691 × 0.01 = 26.91 kg`, exactly the observed value. The towel is ~2691×
+   heavier than intended.
+2. **Stiff sheet + tiny pusher.** Spring stiffness is stretch `10000` / bend
+   `7500` / shear `1500`; `particleContactOffset = 0.005 m`. The V8 pusher is a
+   `0.10 kg` kinematic sphere. A light, teleport-driven kinematic sphere cannot
+   drag a 26.9 kg, very-stiff sheet resting on a friction support — which is why
+   every prior "fold" was produced by writing particle positions directly
+   (`set_points`), i.e. bypassing contact entirely.
+
+**Therefore the contact blocker is now concrete and fixable-in-principle:** the
+towel must be re-authored with a realistic total mass (fix the density/mass bug)
+and softer springs before any rigid-contact fold can be expected. V10 tests this
+directly.
 
 ## Are contact mechanics solved?
 
