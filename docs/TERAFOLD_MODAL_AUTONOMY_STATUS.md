@@ -6,28 +6,34 @@ _Autonomous Modal readiness report. Honest evidence only._
 - **Date:** 2026-07-06
 - **Modal workspace:** `terarobotics`
 - **Modal Volume:** `terafold-artifacts`
-- **Modal apps:** `terafold_policy_training_v0.py` (Track B),
+- **Modal apps:** `terafold_policy_training_v0.py` / `_v1.py` (Track B training),
   `terafold_modal_repo_isaac_smoke.py` (6.0.1 infra),
   `terafold_modal_isaac45_cloth_smoke.py` (4.5.0 cloth + V9),
-  `terafold_modal_isaac45_contact_v10.py` (V10 mass test)
+  `terafold_modal_isaac45_contact_v10.py` (V10 mass), `_contact_v11.py` (V11
+  physics-drive SOLVE), `terafold_modal_isaac45_so101_v12.py` (V12 SO-101 port),
+  `terafold_policy_training_v2_robot_contact.py` (gated, skipped)
 
 ## Headline
 
 - `training_infra_ready = true`
-- `contact_transfer_solved = true` (V11 — primitive collider, partial fold)
-- `final_robot_contact_policy_training_ready = true` at the mechanism level
-  (rigid contact provably moves + partially folds the towel with valid metrics),
-  with the remaining engineering being: port the drive to the SO-101 gripper and
-  achieve a full fold, then generate real contact demonstrations.
+- `contact_transfer_mechanism_solved = true` (V11 — physics-driven **primitive**
+  collider moves + partially folds the cloth; teleport does not)
+- `so101_contact_transfer_solved = false` (V12 — the physics-drive test on the
+  real SO-101 scene did not execute; blocked by an IsaacLab RL-extension conflict)
+- `robot_contact_data_ready = false` (no real robot-joint-action contact demos)
+- `final_robot_contact_policy_training_ready = false` (Training v2 honestly
+  SKIPPED; no fake robot-contact training)
 
-Training infrastructure on Modal is proven end-to-end (GPU + volume + the repo's
-own training code path). **The contact-transfer blocker is now SOLVED**: V11
-showed that driving the collider through the physics API
-(`RigidPrim.set_world_poses`, giving the kinematic body a real swept velocity)
-instead of teleporting its USD transform makes the same kinematic sphere move
-the resting cloth — edge displacement `0.081 m` and width `0.68 → 0.63` — a
-valid rigid contact transfer, not a particle teleport. (Isaac Sim 6.0.1 still
-lacks the particle-cloth API; all cloth work runs on Isaac Sim 4.5.0.)
+Training infrastructure on Modal is proven end-to-end. The **contact-transfer
+mechanism is solved** (V11: `RigidPrim.set_world_poses` gives the kinematic body
+a real swept velocity → moves the resting cloth, edge `0.081 m`, width
+`0.68 → 0.63`; a USD-transform teleport does not). V12 confirmed the real SO-101
+arm scene **builds on Modal** (leisaac + downloaded `so101_follower.usd`) and that
+the same physics-drive fix is the correct port (the V8 SO-101 proxies were
+teleported — the exact V11 defect). But the V12 physics-drive execution is
+**blocked** by an IsaacLab packaging issue (see below), so no real robot-contact
+demonstrations were produced and Training v2 was honestly skipped. (Isaac Sim
+6.0.1 lacks the particle-cloth API; all cloth work runs on Isaac Sim 4.5.0.)
 
 ## Evidence table
 
@@ -49,6 +55,11 @@ lacks the particle-cloth API; all cloth work runs on Isaac Sim 4.5.0.)
 | V11 teleport baseline (V8 method) | NO (confirms cause) | edge_disp 0.0, width 0.68→0.68 | USD teleport gives ~0 swept velocity |
 | V11 dynamic high-velocity sphere | SPURIOUS (excluded) | edge_disp 1.97m but width unchanged + particles at 5.0 velocity cap = ballistic fling | not a valid fold |
 | Training v1 (5000 steps) | PASS | loss 1.006→1.9e-6, val 0.0023, 5 ckpts on volume | synthetic labels (by design) |
+| V12 real SO-101 arm scene on Modal | PASS | inspect: leisaac + `so101_follower.usd` load; arm bodies `[base..jaw]`, jaws (±0.79,−0.24,0.37), 2691-particle towel | none (Brev replaceable for SO-101) |
+| V12 drive audit | DONE | arm = articulation targets (physics); V8 fingertip proxies = `set_prim_translation` teleport (the V11 defect) | — |
+| V12 SO-101 fingertip physics-drive test | BLOCKED | contact-drive scripts fatally fail at SimulationApp startup: `isaaclab_rl` ext → `ModuleNotFoundError: rl_games` | IsaacLab RL-extension packaging conflict |
+| V12 robot-contact demos | NOT PRODUCED | physics-drive test blocked → 0 demos | gated on V12 execution |
+| Training v2 (robot-contact) | SKIPPED (honest) | `training_v2_robot_contact_summary.json`: `robot_contact_data_used=false`, reason "V12 robot-contact demos not ready" | no valid robot-contact data |
 | Final robot-contact policy training | ALLOWED at mechanism level | V11 valid rigid contact transfer with metrics | remaining: SO-101 gripper drive + full fold + real demos |
 
 ## Modal tests passed
@@ -192,36 +203,64 @@ the same physics-driven drive to the SO-101 gripper bodies (articulation
 targets), tune for a full fold (`best_width < 0.5`), and record real contact
 demonstrations for policy training.
 
-## Is final robot-contact training allowed?
+**For the real SO-101 robot: NO.** `final_robot_contact_policy_training_ready =
+false`. V12 could not produce valid robot-contact demonstrations (the SO-101
+physics-drive test is blocked, see below), so Training v2 was honestly SKIPPED
+(`robot_contact_data_used = false`). No fake robot-contact training was run.
+The physics-drive MECHANISM is proven (V11, primitive collider), but that is not
+the same as a trainable SO-101 robot-contact policy.
 
-**At the mechanism level, yes** — `final_robot_contact_policy_training_ready =
-true`: rigid contact provably moves the towel with valid metrics via a valid
-drive (no particle teleporting). The honest next milestone before a *final*
-robot-contact policy is porting the drive to the SO-101 gripper + achieving a
-full fold + generating real contact demonstration data.
+## V12 — SO-101 physics-drive port (real arm builds on Modal; execution blocked)
+
+What V12 established (`modal_apps/terafold_modal_isaac45_so101_v12.py` +
+`scripts/tera/*_v12.py`):
+
+1. **The real SO-101 arm scene builds on Modal.** `inspect_so101_drive_modes_v12`
+   cloned LeIsaac (`github.com/LightwheelAI/leisaac`), downloaded
+   `so101_follower.usd` (GitHub release v0.1.0, 23 MB), set `LEISAAC_ASSETS_ROOT`,
+   and built `create_standalone_so101_clean_towel_scene`: arm bodies
+   `[base, shoulder, upper_arm, lower_arm, wrist, gripper, jaw]`, joints
+   `[shoulder_pan..gripper]`, jaws at (±0.79, −0.24, 0.37), 2691-particle towel.
+   → Brev is replaceable for SO-101 work too.
+2. **Drive audit.** The SO-101 arm is driven by articulation position targets
+   (`set_joint_position_target` → physics-resolved). But the V8 fingertip PROXIES
+   (which do the cloth contact, because the raw jaw geometry under-contacts) are
+   moved by `set_prim_translation` — a USD teleport with ~zero swept velocity,
+   i.e. the exact defect V11 identified. So the correct fix is the V11 mechanism:
+   drive the proxies via `RigidPrim.set_world_poses`.
+
+**Blocker (why the physics-drive test did not execute):** on this Isaac Sim 4.5.0
+image, the scripts that import the V11 contact-drive module fatally fail at
+`SimulationApp` startup — the IsaacLab `isaaclab_rl` extension auto-loads and does
+`from rl_games.common import env_configurations` → `ModuleNotFoundError: rl_games`
+(it also needs `rsl_rl`, `sb3`, `skrl`, old `gym`). This is a **packaging/kit
+issue, not a contact-physics issue**. Notes from 7 debugging runs:
+- The same `isaaclab_rl` load failure is NON-fatal for `create`/`inspect` but
+  FATAL for the contact-drive scripts (config/extension-ordering dependent:
+  a leisaac-importing app poisons the kit `user.config.json` for later apps in
+  the same container).
+- Installing `rl_games rsl_rl skrl stable-baselines3` pulls a **conflicting torch
+  (cu13)** that would break Isaac Sim 4.5's bundled torch 2.5.1+cu118.
 
 ## Exact next command/job to run
 
-V11 SOLVED the contact-drive blocker: drive the collider via the physics
-kinematic target (`RigidPrim.set_world_poses`), not a USD-transform teleport.
-Re-confirm and then advance to the SO-101 gripper (V12):
+Resolve the `isaaclab_rl` conflict, then run the V11 mechanism on the SO-101
+fingertip proxy. Recommended, in order of cleanliness:
+1. Provide lightweight **stub packages** for `rl_games`/`rsl_rl`/`stable_baselines3`/
+   `skrl` (a `sys.meta_path` finder returning dummy modules) so `isaaclab_rl`
+   loads without pulling torch — install it at the top of each contact-drive
+   script before `AppLauncher`.
+2. And/or **isolate each SO-101 Isaac script in its own Modal container** (fresh
+   kit config) — share state (towel USD, JSONs, demos) via the `terafold-artifacts`
+   volume instead of container-local `/workspace`.
+3. Then re-run `terafold_modal_isaac45_so101_v12.py`; expect
+   `test_so101_fingertip_physics_drive_v12.py` to show teleport-fails vs
+   physics-`set_world_poses`-works on the SO-101 fingertip proxy.
+4. If it moves the cloth, extend to a full arm-articulation fold (needs the V6
+   reach solution, also re-runnable on Modal) to generate REAL (state, joint_action)
+   contact demos → `training_v2_robot_contact` with `robot_contact_data_used=true`.
 
-```
-# Re-confirm V11 (contact transfer solved):
-python3 -m modal run modal_apps/terafold_modal_isaac45_contact_v11.py
-python3 -m modal volume get terafold-artifacts \
-  /contact_v11/contact_v11_summary.json ./contact_v11_summary.json
-cat contact_v11_summary.json   # best_trial = kinematic_velocity_slow, solved=true
-```
-
-**V12 (next):** apply the same physics-driven drive to the SO-101 gripper bodies
-via articulation joint-position targets (reuse `clean_towel_v4_common.apply_action_step`,
-but verify the arms actually move the gripper through the cloth with a real swept
-velocity rather than teleporting), then:
-- tune for a full fold (`best_width < 0.5`, not just < 0.65),
-- record real contact demonstration episodes,
-- feed those into a training_v2 that sets `robot_contact_data_used = true`.
-
-Success metrics (already met by V11 at the primitive level): `actual_touch < 0.01 m`,
-`edge_displacement > 0.02 m`, `best_width < 0.65`, particle-velocity spike near
-contact — via valid rigid contact, NEVER by writing particle positions (`set_points`).
+Success metrics (met by V11 at the primitive level, to be reproduced on SO-101):
+`actual_touch < 0.01 m`, `edge_displacement > 0.02 m`, `best_width < 0.65`,
+particle-velocity spike — via valid rigid contact, NEVER by writing particle
+positions (`set_points`), and NEVER counting a ballistic fling.
