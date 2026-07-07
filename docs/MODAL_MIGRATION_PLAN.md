@@ -58,12 +58,36 @@ Conclusion: to run the real cloth/contact scripts on Modal we must match the
 Isaac Sim version Brev used. See `modal_apps/terafold_modal_isaac45_cloth_smoke.py`
 (Isaac Sim 4.5.0 + IsaacLab v2.0.2).
 
+### Track A — Isaac Sim 4.5.0 on Modal (particle cloth PROVEN + contact blocker reproduced)
+
+`modal_apps/terafold_modal_isaac45_cloth_smoke.py` ran on Modal L40S with Isaac
+Sim `4.5.0` + IsaacLab `v2.0.2` (torch `2.5.1+cu118` bundled) and proved that
+the REAL Tera particle-cloth scripts run on Modal:
+- `create_clean_rect_towel_usd_v2.py` -> `CLEAN_RECT_TOWEL_USD_V2_CREATED`
+- `test_clean_rect_towel_usd_v2.py`   -> `CLEAN_RECT_TOWEL_USD_V2_TEST_OK`
+  (this is the exact test that FAILS on 6.0.1; `SingleClothPrim` instantiates
+  and simulates on 4.5)
+- `test_clean_towel_primitive_contact_v8.py` -> `CLEAN_TOWEL_PRIMITIVE_CONTACT_V8_DONE`
+
+=> Brev can be abandoned for cloth/contact work too; Modal + Isaac Sim 4.5.0 is
+the replacement runtime.
+
+The V8 contact result reproduced the Brev blocker EXACTLY on Modal:
+- `actual_touch_achieved=true`, `nearest_collider_to_towel_particle_m=0.0`
+- `primitive_moves_towel=false`, `selected_edge_particle_displacement=0.0`
+- `start_width==best_width==final_width==0.68` (cloth completely static)
+
+The displacement being *exactly* 0.0 (not merely small) triggered the V9
+particle-sim sanity probe (`scripts/tera/inspect_clean_towel_particle_sim_v9.py`),
+which asks the more fundamental question: does the cloth simulate under gravity
+at all? (Result recorded in the autonomy status doc.)
+
 ## Not proven yet
 
-Particle-cloth simulation on Modal (Isaac Sim 4.5.0) is being verified.
 Autonomous robot-contact towel folding has not been proven.
-The clean towel rigid-contact issue is not solved (and, on 6.0.1, the cloth
-primitive itself does not exist).
+The clean-towel rigid/particle contact issue is not solved: touch is achieved
+but zero motion is transferred to the cloth. Root-cause diagnosis is in
+`inspect_clean_towel_particle_sim_v9.py`.
 
 ## Modal roles
 
