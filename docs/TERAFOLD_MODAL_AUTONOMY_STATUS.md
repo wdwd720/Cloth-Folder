@@ -2,10 +2,14 @@
 
 _Autonomous Modal readiness report. Honest evidence only._
 
-- **Git commit:** `dd6ac9a` (branch `main`, pushed to `origin`)
+- **Branch:** `main`, pushed to `origin` (see `git log` for the latest commit)
 - **Date:** 2026-07-06
 - **Modal workspace:** `terarobotics`
 - **Modal Volume:** `terafold-artifacts`
+- **Modal apps:** `terafold_policy_training_v0.py` (Track B),
+  `terafold_modal_repo_isaac_smoke.py` (6.0.1 infra),
+  `terafold_modal_isaac45_cloth_smoke.py` (4.5.0 cloth + V9),
+  `terafold_modal_isaac45_contact_v10.py` (V10 mass test)
 
 ## Headline
 
