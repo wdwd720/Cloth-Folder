@@ -43,6 +43,14 @@ _Autonomous Modal readiness report. Honest evidence only._
 - **`final_robot_contact_policy_training_ready = true`** (**V14 / Training v2** ran
   with `robot_contact_data_used=true` on the real demos: loss `0.546 → 0.0002`,
   validation action-MAE `0.0024`, checkpoint on the volume — NOT fake, NOT synthetic)
+- **`no_phase_clock_policy_works = true`** (**V16 / v3** — the #1 V14/eval-v2 caveat
+  RESOLVED: the state-reactive policy has NO progress/phase clock in its observation
+  and still folds the towel autonomously CLOSED-LOOP (all rollouts reduce width). It is
+  also less ballistic than v2 (v2 `~0.5` ballistic → v3 raw `~0.225` avg, `0.067` with an
+  action filter). Honestly NOT robust yet: GPU physics is non-deterministic so the
+  ballistic tail is unstable run-to-run (`0.10–0.35`), and clean folds are gentle
+  (`width_after ~0.58`) while the deepest folds couple with ballistic over-drive. See
+  "V16 / v3" below.)
 
 Training infrastructure on Modal is proven end-to-end, and **as of V14 the full
 real-robot-contact pipeline is closed**: the REAL SO-101 arm (physics-resolved joint
@@ -58,8 +66,8 @@ real **fold** by fixing the robot-side contact geometry (a wide disk vs the
 under-contacting fingertip) with a gentle-press/slow-drag motion. (Isaac Sim 6.0.1 lacks
 the particle-cloth API; all cloth work runs on Isaac Sim 4.5.0.) See the V14 section for
 the full honest caveats (the disk is a jaw-mounted tool; the touch metric is
-center-based; width reduction is partly stiffness coupling; the eval policy carries a
-progress clock).
+center-based; width reduction is partly stiffness coupling; the V14 eval policy carried a
+progress clock — RESOLVED in V16/v3, whose state-reactive policy has no clock).
 
 ## Evidence table
 
@@ -91,6 +99,9 @@ progress clock).
 | **V14 real robot-contact demos** | **PASS** | `12/12` valid replay episodes, `2832` samples, `action_is_real_joint_targets=true`, volume-only | — |
 | **Training v2 (robot-contact)** | **RAN (`robot_contact_data_used=true`)** | loss `0.546→0.0002`, val action-MAE `0.0024`, ckpt on volume, `final_robot_contact_policy_training_ready=true` | — |
 | Eval v2 (closed-loop policy rollout) | RAN (autonomous fold) | 6/6 reduce width (mean `0.68→0.521`); `3/6` clean valid, `3/6` fold-but-ballistic; `success_rate=0.5` | progress-clock obs → learned trajectory, not proven state-reactive; 3/6 over-drive |
+| **V16 state-reactive demos (no clock)** | **PASS** | `21` valid / `11` ballistic / `0` no-fold; `4802` samples, `state_dim=72`, `no_phase_clock=true`, validator all-14-checks pass; valid folds `0.68→0.564`; volume-only | ballistic demos excluded; demos cleanly fold only to ~`0.56` |
+| **Training v3 (state-reactive, no clock)** | **PASS** | `robot_contact_data_used=true`, `no_phase_clock=true`, 21 ep, 4000 steps, loss `0.823→0.000288`, val `0.000322`, action-MAE `0.00126`, smoothness-penalty `0.00042` | — |
+| **Eval v3 (closed-loop, no clock)** | **RAN — no-clock policy folds** | raw 2×20 ep: clean `0.90`/`0.60` (30/40=`0.75`), ballistic `0.10`/`0.35` (9/40=`0.225`), all reduce width, mean `width_after~0.58`; action-filter β0.6: ballistic `0.067`, width_after `0.652` | GPU non-determinism → unstable ballistic tail; deep folds (<0.55) couple w/ ballistic; not robust yet |
 
 ## Modal tests passed
 
@@ -572,3 +583,103 @@ more diverse demos.
 `ballistic_or_fake_success_excluded=true`, `contact_geometry_attached_to_robot=true`,
 `free_proxy_used_for_success=false`, `real_joint_actions_used=true`,
 `robot_contact_data_ready=true`, `final_robot_contact_policy_training_ready=true`.
+
+## V16 / v3 — state-reactive (no-phase-clock) fold policy
+
+The V14/eval-v2 caveat was that the observation carried a `progress`/`phase` clock, so
+the BC policy was closer to a learned open-loop trajectory than proven state-reactive
+control, and 3/6 eval-v2 rollouts over-drove into ballistic velocity. The V16/v3 sprint
+removes the clock and adds an anti-ballistic training penalty.
+
+Source: `scripts/tera/so101_state_reactive_common_v16.py`,
+`scripts/tera/run_so101_real_contact_demo_collection_v16.py`,
+`scripts/tera/validate_so101_real_contact_demos_v16.py`,
+`scripts/tera/summarize_so101_demo_dataset_v16.py`,
+`scripts/tera/eval_so101_state_reactive_policy_v3.py`,
+`modal_apps/terafold_modal_isaac45_so101_v16.py`,
+`modal_apps/terafold_policy_training_v3_state_reactive.py`,
+`modal_apps/terafold_policy_eval_v3_state_reactive.py`.
+
+### Observation cleanup — NO phase clock
+
+`compact_state_reactive` is a 72-D state with **no** `progress` scalar and **no** `phase`
+one-hot: joint angles(12) + jaw pose(6) + jaw velocity(3) + previous action(12) + cloth
+metrics(12) + corner/edge features(24) + relative jaw-to-edge(3). The fold "phase" is
+INFERABLE from the real joint configuration (state), never handed to the policy as a
+scripted timestep. A CPU validator scans the saved feature names for any clock token; the
+dataset passed clock-free (`no_clock_feature_names=true`).
+
+### V16 dataset verdict — PASS (`robot_contact_data_ready = true`)
+
+`run_so101_real_contact_demo_collection_v16.py` re-runs the PROVEN V14 disk press+drag
+mechanism PARAMETRICALLY (randomizing towel x/y offset, edge target offset, press depth,
+drag distance, drag speed, contact-patch offset), recording the state-reactive obs + the
+REAL 12-D commanded joint targets each physics step, and classifies every episode.
+
+- `num_valid_success = 21` (≥20 required), `num_ballistic = 11`, `num_nofold = 0`
+- `total_samples = 4802`, `state_dim = 72`, `action_dim = 12`, `no_phase_clock = true`
+- valid demos fold the normal towel width `0.68 → 0.564` (mean over 21 diverse valid folds;
+  smaller than the single V14 best `0.509` because the demos span gentle→strong drags)
+- validator: all 14 invariants pass (`no_clock_feature_names`, `state_dim_is_72`,
+  `action_is_real_joint_targets`, `min_valid_met`, `ready_flag_consistent`, …)
+- ballistic / no-fold episodes are labeled and EXCLUDED from the training set
+- volume-only: `/artifacts/contact_v16/demos/so101_real_contact_demos_v16.npz` (never git)
+
+### Training v3 verdict — PASS (`final_robot_contact_policy_training_ready = true`)
+
+`terafold_policy_training_v3_state_reactive.py` is triple-gated (real robot-contact data
+AND `no_phase_clock=true` AND a clock-free feature scan) and adds an anti-ballistic
+smoothness/velocity penalty `0.5 · mean‖pred_action − prev_action‖²` (prev_action is
+embedded in the state) plus weight-decay effort regularization.
+
+- `robot_contact_data_used=true`, `no_phase_clock=true`, `num_episodes=21`, `train_steps=4000`
+- `initial_loss 0.823 → final_loss 0.000288`, `validation_loss 0.000322`
+- `action_mae 0.00126`, `validation_action_mae 0.00139`, `smoothness_penalty 0.00042`
+- checkpoint on the volume: `/artifacts/training_v3_state_reactive/policy_v3_state_reactive.pt`
+
+### Eval v3 verdict — the no-clock policy folds; robustness honestly caveated
+
+`eval_so101_state_reactive_policy_v3.py` runs the v3 checkpoint CLOSED-LOOP with the
+state-reactive observation (no clock), physics-resolved articulation, the winning V14 disk
+geometry, randomized towel starts, and ballistic rejection.
+
+| run | clean rate | ballistic rate | mean width_after | notes |
+|---|---|---|---|---|
+| raw β0, 20 ep (seed 3030) | **0.90** (18/20) | 0.10 (2/20) | 0.589 | all 20 reduce width |
+| raw β0, 20 ep (seed 3030, re-run) | 0.60 (12/20) | 0.35 (7/20) | 0.566 | same seed, different outcome (GPU non-determinism) |
+| **raw combined (40 rollouts)** | **0.75** (30/40) | **0.225** (9/40) | ~0.58 | all reduce width; best clean fold `0.482` |
+| action-filter β0.6, 30 ep | 0.50 (15/30) | **0.067** (2/30) | 0.652 | EMA filter kills ballistic but folds gentler |
+
+- **`no_phase_clock_policy_works = true` (core claim):** with a pure state observation
+  (no progress/phase), the learned policy folds the towel autonomously closed-loop — every
+  rollout reduces width. The #1 V14/eval-v2 caveat is resolved.
+- **Improves on v2:** clean rate `~0.75` avg (`0.60–0.90`) vs v2 `0.5`; ballistic `~0.225`
+  raw avg vs v2 `~0.5`, and `0.067` with the (Track-D) action filter.
+- Acceptance criteria vs the goal: `clean ≥ 0.8` — met in one run (`0.90`), not robustly
+  (avg `~0.75`); `better than v2 clean 0.5` — MET; `mean width_after < 0.55` — NOT met
+  (`~0.58`); `ballistic_rate < 0.2` — borderline raw (`~0.225`, unstable), MET with the filter.
+
+### Honest caveats (V16/v3)
+
+1. **GPU physics is non-deterministic.** Two identical-seed 20-episode runs gave clean
+   `0.90` vs `0.60` and ballistic `0.10` vs `0.35`. The ballistic tail is the sensitive
+   part; a single run is not a robust estimate. Reported numbers use the combined 40
+   rollouts and are labeled per-run.
+2. **Deep folds couple with ballistic over-drive.** The deepest folds observed
+   (`width_after 0.42`, `0.23`) were the ballistic episodes; clean folds are gentle
+   (mean `~0.58`, only ~`3/18` clean folds < `0.55`). The demos themselves cleanly fold
+   only to `~0.56`, so a clean *deep* fold is out of the current data distribution.
+3. **The action filter trades ballistic for depth** (β0.6 → ballistic `0.067` but
+   width_after `0.652`). It is a legitimate closed-loop wrapper (Track D), not a fix to the
+   underlying policy.
+4. `autonomous_so101_fold_policy` is robust on **state-reactivity** and improved on
+   **non-ballistic**, but CAVEATED on **fold-depth** (`width_after ~0.58 > 0.55`) and
+   **run-to-run variance**.
+
+### Exact next step
+
+V17: collect a demo set of DEEP-but-SLOW drags (`drag_dist ~0.20–0.28` over `~180–210`
+steps) so the policy learns clean deep folds and the deep↔ballistic coupling breaks;
+retrain v3 and re-eval over MULTIPLE seeds (report the distribution, not one run); tune the
+action filter to `β~0.3–0.4` for a ballistic/depth balance; optionally add left-arm
+symmetry, a two-arm sequence, and a smaller contact tool.
