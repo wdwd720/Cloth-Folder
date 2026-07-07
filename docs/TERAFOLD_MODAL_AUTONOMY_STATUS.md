@@ -33,7 +33,8 @@ API the Tera stack depends on.
 | Particle-cloth SIM on Modal 4.5.0 | PASS | isaac45 smoke: `CLEAN_RECT_TOWEL_USD_V2_TEST_OK`, `..._V8_DONE` | none (version-matched) |
 | Cloth/rigid contact transfer (moves towel) | FAIL (reproduced on Modal) | isaac45 V8: touch=true, `edge_disp=0.0`, width 0.68→0.68 | core physics blocker |
 | V9 root-cause: cloth simulates under gravity? | YES (solver alive) | V9: 2691 particles settle ~8.8mm then rest; width stays 0.68 | rules out frozen/pinned cloth |
-| Final robot-contact policy training | NOT ALLOWED | contact mechanics unproven | gated on contact transfer |
+| V10 mass/stiffness fix moves towel? | NO (refuted) | V10: mesh MassAPI ignored (mass stays 26.91kg), soft springs still disp=0.0 | blocker is collider-drive, not mass/stiffness |
+| Final robot-contact policy training | NOT ALLOWED | contact mechanics unproven | gated on contact transfer (V11: collider drive) |
 
 ## Modal tests passed
 
@@ -101,10 +102,31 @@ explain the zero contact transfer:
    every prior "fold" was produced by writing particle positions directly
    (`set_points`), i.e. bypassing contact entirely.
 
-**Therefore the contact blocker is now concrete and fixable-in-principle:** the
-towel must be re-authored with a realistic total mass (fix the density/mass bug)
-and softer springs before any rigid-contact fold can be expected. V10 tests this
-directly.
+**Therefore a natural hypothesis was:** re-author the towel with a realistic mass
+and softer springs. V10 tested this directly — and REFUTED it (see below).
+
+### V10 corrected-mass/soft-spring test (Modal Isaac Sim 4.5.0) — NEGATIVE, and informative
+
+`test_clean_towel_contact_corrected_mass_v10.py` re-authored the towel via the
+UNCHANGED create script with `--mass = 0.15/2691` (per-particle) and soft springs
+(stretch 300 / bend 40 / shear 60), then ran the unchanged V8 contact trial.
+
+Result:
+- `corrected_cloth_mass_readback_kg = 26.91` — **UNCHANGED**. The mesh
+  `UsdPhysics.MassAPI` does NOT govern particle-cloth mass; the particle mass is
+  set by the particle system, so editing `--mass` / mesh MassAPI has no effect.
+- Even with much softer springs (stretch 300 vs 10000),
+  `selected_edge_particle_displacement = 0.0`, width `0.68 → 0.68`,
+  `primitive_moves_towel = false`.
+
+**Conclusion (evidence-backed):** mass and stiffness are NOT the lever. Two
+hypotheses are now refuted (frozen solver — V9; mass/stiffness — V10). The
+dominant blocker is the **collider→particle contact-drive mechanism**: a
+kinematic sphere teleported per frame via `set_prim_translation` imparts no
+impulse to the resting particles. The correct next experiment (V11) is to change
+HOW the collider is driven — a dynamic, velocity-driven rigid body, or a proper
+PhysX kinematic target so the body carries a real swept velocity — and to set
+particle mass via the particle system / PBD material rather than the mesh MassAPI.
 
 ## Are contact mechanics solved?
 
@@ -120,21 +142,26 @@ training-infra work is authorized until contact transfer is proven with metrics
 
 ## Exact next command/job to run
 
-Cloth on Modal is proven and the blocker is localized to collider→particle
-contact transfer. The next experiment is V10: does a **dynamic, velocity-driven**
-rigid pusher (instead of a teleported kinematic sphere) transfer lateral motion
-to the resting cloth?
+V9 (frozen solver) and V10 (mass/stiffness) are both refuted. The blocker is the
+collider→particle **contact-drive mechanism**. The next experiment is V11:
+
+1. Drive the collider with a real velocity, not a per-frame USD teleport:
+   wrap the sphere in `isaacsim.core.prims.SingleRigidPrim` and either
+   (a) set a velocity-driven kinematic target each physics step, or
+   (b) make it a dynamic rigid body and give it an initial velocity into the edge.
+2. Set the towel's particle mass via the particle system / PBD material
+   (`add_pbd_particle_material(..., density=...)`) or per-particle mass through
+   the particle API — NOT via the mesh `UsdPhysics.MassAPI` (V10 proved that is
+   ignored for particle cloth; mass stays 26.91 kg).
+
+Reuse `test_clean_towel_primitive_contact_v8.py` (scene + metrics) and run on the
+same cached Isaac 4.5.0 image:
 
 ```
-# Re-confirm the current proven state (cloth runs; V9 root-cause):
-python3 -m modal run modal_apps/terafold_modal_isaac45_cloth_smoke.py
-python3 -m modal volume get terafold-artifacts \
-  /modal_isaac45_cloth_smoke/modal_isaac45_cloth_smoke_v1_result.json ./r.json
-cat r.json   # inspect contact_metrics + v9_particle_sim
-
-# Then build + run V10 (dynamic rigid pusher) on the same Isaac 4.5.0 image.
+python3 -m modal run modal_apps/terafold_modal_isaac45_contact_v10.py   # re-baseline
+# then author test_clean_towel_dynamic_pusher_v11.py and a matching runner app.
 ```
 
-Success metrics for V10 contact transfer: `edge_displacement > 0.02 m`,
-`best_width < 0.65`, particle velocities change near contact, via a valid
-rigid/kinematic contact (not by directly writing particle positions).
+Success metrics for real contact transfer: `edge_displacement > 0.02 m`,
+`best_width < 0.65`, particle velocities change near contact — via valid
+rigid/kinematic contact, NOT by writing particle positions (`set_points`).
