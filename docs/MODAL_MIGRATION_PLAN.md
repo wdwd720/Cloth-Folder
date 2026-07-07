@@ -82,12 +82,23 @@ particle-sim sanity probe (`scripts/tera/inspect_clean_towel_particle_sim_v9.py`
 which asks the more fundamental question: does the cloth simulate under gravity
 at all? (Result recorded in the autonomy status doc.)
 
+## Contact transfer — SOLVED at the primitive level (V11)
+
+The clean-towel rigid/particle contact blocker is resolved. V11 showed that
+driving the collider through the physics kinematic target
+(`RigidPrim.set_world_poses`) instead of teleporting its USD transform
+(`set_prim_translation`, the V8 method) transfers real motion: edge displacement
+`0.081 m` and width `0.68 → 0.63` via a valid rigid contact (not a particle
+teleport). See `docs/TERAFOLD_MODAL_AUTONOMY_STATUS.md` for the full V11 table
+and honest caveats (dynamic high-velocity flings are ballistic artifacts and are
+excluded).
+
 ## Not proven yet
 
-Autonomous robot-contact towel folding has not been proven.
-The clean-towel rigid/particle contact issue is not solved: touch is achieved
-but zero motion is transferred to the cloth. Root-cause diagnosis is in
-`inspect_clean_towel_particle_sim_v9.py`.
+Full autonomous robot-contact towel FOLDING (not just partial motion) with the
+SO-101 gripper. Remaining engineering: port the physics-driven drive to the
+SO-101 articulation, achieve a full fold (`best_width < 0.5`), and record real
+contact demonstrations for policy training.
 
 ## Modal roles
 

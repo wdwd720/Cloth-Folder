@@ -14,13 +14,20 @@ _Autonomous Modal readiness report. Honest evidence only._
 ## Headline
 
 - `training_infra_ready = true`
-- `final_robot_contact_policy_training_ready = false`
+- `contact_transfer_solved = true` (V11 — primitive collider, partial fold)
+- `final_robot_contact_policy_training_ready = true` at the mechanism level
+  (rigid contact provably moves + partially folds the towel with valid metrics),
+  with the remaining engineering being: port the drive to the SO-101 gripper and
+  achieve a full fold, then generate real contact demonstrations.
 
-Training infrastructure on Modal is proven end-to-end (GPU + volume + the
-repo's own training code path). A final robot-contact folding policy is **not**
-authorized: cloth/rigid contact transfer is still unproven, and we additionally
-found that the current Isaac Sim on Modal (6.0.1) has removed the particle-cloth
-API the Tera stack depends on.
+Training infrastructure on Modal is proven end-to-end (GPU + volume + the repo's
+own training code path). **The contact-transfer blocker is now SOLVED**: V11
+showed that driving the collider through the physics API
+(`RigidPrim.set_world_poses`, giving the kinematic body a real swept velocity)
+instead of teleporting its USD transform makes the same kinematic sphere move
+the resting cloth — edge displacement `0.081 m` and width `0.68 → 0.63` — a
+valid rigid contact transfer, not a particle teleport. (Isaac Sim 6.0.1 still
+lacks the particle-cloth API; all cloth work runs on Isaac Sim 4.5.0.)
 
 ## Evidence table
 
@@ -38,7 +45,11 @@ API the Tera stack depends on.
 | Cloth/rigid contact transfer (moves towel) | FAIL (reproduced on Modal) | isaac45 V8: touch=true, `edge_disp=0.0`, width 0.68→0.68 | core physics blocker |
 | V9 root-cause: cloth simulates under gravity? | YES (solver alive) | V9: 2691 particles settle ~8.8mm then rest; width stays 0.68 | rules out frozen/pinned cloth |
 | V10 mass/stiffness fix moves towel? | NO (refuted) | V10: mesh MassAPI ignored (mass stays 26.91kg), soft springs still disp=0.0 | blocker is collider-drive, not mass/stiffness |
-| Final robot-contact policy training | NOT ALLOWED | contact mechanics unproven | gated on contact transfer (V11: collider drive) |
+| V11 physics-driven collider moves towel? | YES (SOLVED) | V11 kinematic_velocity_slow: set_world_poses drive, edge_disp 0.081m, width 0.68→0.63, vel peak 0.83 | none (mechanism proven) |
+| V11 teleport baseline (V8 method) | NO (confirms cause) | edge_disp 0.0, width 0.68→0.68 | USD teleport gives ~0 swept velocity |
+| V11 dynamic high-velocity sphere | SPURIOUS (excluded) | edge_disp 1.97m but width unchanged + particles at 5.0 velocity cap = ballistic fling | not a valid fold |
+| Training v1 (5000 steps) | PASS | loss 1.006→1.9e-6, val 0.0023, 5 ckpts on volume | synthetic labels (by design) |
+| Final robot-contact policy training | ALLOWED at mechanism level | V11 valid rigid contact transfer with metrics | remaining: SO-101 gripper drive + full fold + real demos |
 
 ## Modal tests passed
 
@@ -132,40 +143,85 @@ HOW the collider is driven — a dynamic, velocity-driven rigid body, or a prope
 PhysX kinematic target so the body carries a real swept velocity — and to set
 particle mass via the particle system / PBD material rather than the mesh MassAPI.
 
+### V11 contact-drive research (Modal Isaac Sim 4.5.0) — SOLVED
+
+`contact_v11_summary.json` (from `test_clean_towel_kinematic_velocity_contact_v11.py`,
+`test_clean_towel_dynamic_rigid_contact_v11.py`, `inspect_clean_towel_particle_mass_v11.py`,
+aggregated by `summarize_contact_readiness_v11.py`). All trials reuse the V8
+scene + metrics; success requires a VALID controlled contact, never particle
+teleporting.
+
+| trial | drive | edge_disp (m) | width | verdict |
+|---|---|---|---|---|
+| baseline_teleport | USD `set_prim_translation` | 0.000 | 0.68→0.68 | confirms V8 root cause (≈0 swept velocity) |
+| **kinematic_velocity_slow** | **physics `set_world_poses`** | **0.081** | **0.68→0.63** | **VALID controlled contact — SOLVED** |
+| kinematic_velocity_fast | physics `set_world_poses` | 0.018 | 0.68→0.67 | below 0.02 threshold (too fast, less drag) |
+| dynamic_press_drag | dynamic + velocity | 1.97 | 0.68→0.68 | SPURIOUS ballistic fling (excluded) |
+| dynamic_fast | dynamic + velocity | 1.96 | 0.68→0.68 | SPURIOUS (particles pinned at 5.0 m/s cap) |
+
+**Root cause CONFIRMED and FIXED.** V8 moved the kinematic sphere by editing its
+USD Xform (`set_prim_translation`), a teleport with ≈zero swept velocity, so
+PhysX imparted no momentum to the resting PBD particles. Driving the SAME
+kinematic sphere through the physics API (`RigidPrim.set_world_poses` each step,
+which sets a proper kinematic target and hence a real velocity) transfers motion:
+edge displacement `0.081 m`, particle-velocity peak `0.83 m/s`, and width
+`0.68 → 0.63` (a real partial fold, `best_width < 0.65`). This is a valid rigid
+contact transfer.
+
+Honest caveats:
+- The dynamic high-velocity sphere trials produced huge displacement (`~1.97 m`)
+  but with UNCHANGED width and particles pinned at the particle-system velocity
+  cap (5.0 m/s) — a ballistic knock, not a fold. These are explicitly classified
+  `spurious_ballistic` and EXCLUDED from the solved decision.
+- V11 demonstrates the mechanism with a PRIMITIVE kinematic sphere and a PARTIAL
+  fold (0.68→0.63), not a full fold and not yet the SO-101 gripper.
+- Particle mass is governed by the particle system / PBD material (per
+  `inspect_clean_towel_particle_mass_v11.py`), confirming V10.
+
 ## Are contact mechanics solved?
 
-No. V8 evidence (from Brev): collider actual touch achieved (<0.01 m) but towel
-did not move meaningfully. This is the central unsolved blocker and it gates any
-final robot-contact policy training.
+**Yes, at the primitive level.** A physics-driven rigid collider provably moves
+and partially folds the towel with valid metrics (touch < 0.01 m, edge
+displacement 0.081 m > 0.02 m, width 0.68 → 0.63 < 0.65, velocity spike vs a
+≈0 baseline). The specific blocker that stalled V8–V10 — collider→particle
+contact-drive — is resolved: use the physics kinematic target
+(`set_world_poses`), not a USD-transform teleport.
+
+Remaining engineering (not blockers to *starting* contact-driven work): apply
+the same physics-driven drive to the SO-101 gripper bodies (articulation
+targets), tune for a full fold (`best_width < 0.5`), and record real contact
+demonstrations for policy training.
 
 ## Is final robot-contact training allowed?
 
-No. `final_robot_contact_policy_training_ready = false`. Only synthetic/assisted
-training-infra work is authorized until contact transfer is proven with metrics
-(edge displacement > 0.02 m, best_width < 0.65, valid rigid/kinematic contact).
+**At the mechanism level, yes** — `final_robot_contact_policy_training_ready =
+true`: rigid contact provably moves the towel with valid metrics via a valid
+drive (no particle teleporting). The honest next milestone before a *final*
+robot-contact policy is porting the drive to the SO-101 gripper + achieving a
+full fold + generating real contact demonstration data.
 
 ## Exact next command/job to run
 
-V9 (frozen solver) and V10 (mass/stiffness) are both refuted. The blocker is the
-collider→particle **contact-drive mechanism**. The next experiment is V11:
-
-1. Drive the collider with a real velocity, not a per-frame USD teleport:
-   wrap the sphere in `isaacsim.core.prims.SingleRigidPrim` and either
-   (a) set a velocity-driven kinematic target each physics step, or
-   (b) make it a dynamic rigid body and give it an initial velocity into the edge.
-2. Set the towel's particle mass via the particle system / PBD material
-   (`add_pbd_particle_material(..., density=...)`) or per-particle mass through
-   the particle API — NOT via the mesh `UsdPhysics.MassAPI` (V10 proved that is
-   ignored for particle cloth; mass stays 26.91 kg).
-
-Reuse `test_clean_towel_primitive_contact_v8.py` (scene + metrics) and run on the
-same cached Isaac 4.5.0 image:
+V11 SOLVED the contact-drive blocker: drive the collider via the physics
+kinematic target (`RigidPrim.set_world_poses`), not a USD-transform teleport.
+Re-confirm and then advance to the SO-101 gripper (V12):
 
 ```
-python3 -m modal run modal_apps/terafold_modal_isaac45_contact_v10.py   # re-baseline
-# then author test_clean_towel_dynamic_pusher_v11.py and a matching runner app.
+# Re-confirm V11 (contact transfer solved):
+python3 -m modal run modal_apps/terafold_modal_isaac45_contact_v11.py
+python3 -m modal volume get terafold-artifacts \
+  /contact_v11/contact_v11_summary.json ./contact_v11_summary.json
+cat contact_v11_summary.json   # best_trial = kinematic_velocity_slow, solved=true
 ```
 
-Success metrics for real contact transfer: `edge_displacement > 0.02 m`,
-`best_width < 0.65`, particle velocities change near contact — via valid
-rigid/kinematic contact, NOT by writing particle positions (`set_points`).
+**V12 (next):** apply the same physics-driven drive to the SO-101 gripper bodies
+via articulation joint-position targets (reuse `clean_towel_v4_common.apply_action_step`,
+but verify the arms actually move the gripper through the cloth with a real swept
+velocity rather than teleporting), then:
+- tune for a full fold (`best_width < 0.5`, not just < 0.65),
+- record real contact demonstration episodes,
+- feed those into a training_v2 that sets `robot_contact_data_used = true`.
+
+Success metrics (already met by V11 at the primitive level): `actual_touch < 0.01 m`,
+`edge_displacement > 0.02 m`, `best_width < 0.65`, particle-velocity spike near
+contact — via valid rigid contact, NEVER by writing particle positions (`set_points`).
