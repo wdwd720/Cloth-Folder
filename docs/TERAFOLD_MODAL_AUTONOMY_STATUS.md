@@ -51,6 +51,13 @@ _Autonomous Modal readiness report. Honest evidence only._
   ballistic tail is unstable run-to-run (`0.10–0.35`), and clean folds are gentle
   (`width_after ~0.58`) while the deepest folds couple with ballistic over-drive. See
   "V16 / v3" below.)
+- **`v17_deep_slow_beats_v3 = false`** (**V17 / v4** — HONEST NEGATIVE. V17 collected DEEPER
+  demos (23 valid, `11/23` fold `<0.55`) and Training v4 fit them well, but closed-loop the
+  deep-SLOW policy UNDERPERFORMS v3: multi-seed raw clean `0.40` (`[0.7,0.5,0.0]`, one seed
+  folds nothing), ballistic `0.30`, `width_after ~0.60`, and every EMA filter over-damps it to
+  no-fold. **V3 remains the best VALIDATED state-reactive policy** (clean `~0.75`, width
+  `~0.58`). Lessons: pull-to-mean effort reg over-damps; slow demos need a longer eval horizon
+  AND still hurt BC robustness. See "V17 / v4" below.)
 
 Training infrastructure on Modal is proven end-to-end, and **as of V14 the full
 real-robot-contact pipeline is closed**: the REAL SO-101 arm (physics-resolved joint
@@ -102,6 +109,9 @@ progress clock — RESOLVED in V16/v3, whose state-reactive policy has no clock)
 | **V16 state-reactive demos (no clock)** | **PASS** | `21` valid / `11` ballistic / `0` no-fold; `4802` samples, `state_dim=72`, `no_phase_clock=true`, validator all-14-checks pass; valid folds `0.68→0.564`; volume-only | ballistic demos excluded; demos cleanly fold only to ~`0.56` |
 | **Training v3 (state-reactive, no clock)** | **PASS** | `robot_contact_data_used=true`, `no_phase_clock=true`, 21 ep, 4000 steps, loss `0.823→0.000288`, val `0.000322`, action-MAE `0.00126`, smoothness-penalty `0.00042` | — |
 | **Eval v3 (closed-loop, no clock)** | **RAN — no-clock policy folds** | raw 2×20 ep: clean `0.90`/`0.60` (30/40=`0.75`), ballistic `0.10`/`0.35` (9/40=`0.225`), all reduce width, mean `width_after~0.58`; action-filter β0.6: ballistic `0.067`, width_after `0.652` | GPU non-determinism → unstable ballistic tail; deep folds (<0.55) couple w/ ballistic; not robust yet |
+| **V17 deep-slow demos** | **PASS (deeper than V16)** | `23` valid / `11` ballistic / `0` no-fold, `6554` samples; valid folds `0.68→0.558` (min `0.498`, `11/23` <`0.55`); no clock; validator all-14-pass | mean still `>0.55`; ballistic excluded |
+| **Training v4 (deep-slow, no clock)** | **PASS (attempt 2)** | attempt-1 strong reg over-damped → reverted to v3 recipe (`W_smooth=0.5`, no effort): `bc_loss 8.6e-5`, `action_mae 0.00118`, 23 ep, 5000 steps | pull-to-mean effort reg is wrong for trajectory BC |
+| **Eval v4 (multi-seed, no clock)** | **NEGATIVE — worse than v3** | 3 seeds×betas: raw@340steps clean `0.40` `[0.7,0.5,0.0]`, ballistic `0.30`, width `0.599`; EMA β≥0.3 → no fold | deep-SLOW policy sluggish/high-variance/over-damped by filters; **V3 stays best** |
 
 ## Modal tests passed
 
@@ -683,3 +693,76 @@ steps) so the policy learns clean deep folds and the deep↔ballistic coupling b
 retrain v3 and re-eval over MULTIPLE seeds (report the distribution, not one run); tune the
 action filter to `β~0.3–0.4` for a ballistic/depth balance; optionally add left-arm
 symmetry, a two-arm sequence, and a smaller contact tool.
+
+## V17 / v4 — deep-but-slow state-reactive fold policy
+
+V16/v3 left a coupling: clean folds were gentle (~0.58) while the deepest folds were
+ballistic, because the V16 demos only cleanly folded to ~0.564 and deep demos were fast.
+V17 collects DEEP-but-SLOW demos (drag `0.20-0.28 m` over `180-210` slow steps) to teach
+clean deep folds; Training v4 retrains the no-clock policy; Eval v4 evaluates across
+MULTIPLE seeds and EMA action filters. Source: `scripts/tera/*_v17.py`,
+`scripts/tera/eval_so101_state_reactive_multiseed_v4.py`,
+`modal_apps/terafold_modal_isaac45_so101_v17.py`,
+`modal_apps/terafold_policy_training_v4_deep_slow.py`,
+`modal_apps/terafold_policy_eval_v4_deep_slow.py`. Same V16 state-reactive observation
+(no clock, 72-D).
+
+### V17 dataset verdict — PASS, deeper than V16
+
+Deep-slow sampling realized: drag_dist `0.203-0.274 m`, drag_steps `180-209`, press
+`0.025-0.039`. Recorded the V16 state-reactive obs + real joint targets; classified each.
+
+- `num_valid_success = 23` (≥20), `num_ballistic = 11`, `num_nofold = 0`, `6554` samples
+- valid folds `0.68 → 0.558` mean (`beats_v16_demo_mean = true`, V16 was `0.564`), `min 0.498`,
+  and **`11/23` valid demos fold below `0.55`** (a deeper tail than V16)
+- `no_phase_clock = true`, validator all-14-checks pass; ballistic excluded; volume-only
+
+### Training v4 verdict — PASS, but stronger regularization first BACKFIRED (honest)
+
+Two attempts (the first is a real negative result, reported):
+
+- **Attempt 1 — over-regularized (REJECTED).** `W_SMOOTH=1.0` + an effort penalty
+  `0.05·‖pred−a_mean‖²`. Open-loop fit was fine (`bc_loss 0.000244`), but CLOSED-LOOP it
+  folded erratically (Eval clean `0.27`, seed-variance `[0.7, 0.1, 0.0]`) and **every** EMA
+  filter (β≥0.3) killed folding entirely (width stayed `0.68`). The effort term biased
+  predictions toward the trajectory-mean action, pulling the policy off the sequential
+  approach→press→drag path. Lesson: pull-to-mean effort reg is wrong for trajectory BC.
+- **Attempt 2 — reverted to v3's proven recipe (SHIPPED).** smoothing only (`W_SMOOTH=0.5`,
+  no effort term) on the DEEPER V17 demos: `initial_loss 0.860 → final_loss 0.000166`,
+  `final_bc_loss 0.0000861`, `validation_loss 0.000198`, `action_mae 0.00118`,
+  `smoothness_penalty 0.00016`, `robot_contact_data_used=true`, `no_phase_clock=true`,
+  23 ep, 5000 steps. Checkpoint: `/artifacts/training_v4_deep_slow/policy_v4_deep_slow.pt`.
+
+### Eval v4 verdict (multi-seed × multi-beta) — NEGATIVE: deep-slow did NOT beat v3
+
+`eval_so101_state_reactive_multiseed_v4.py` runs the v4 checkpoint closed-loop (no clock,
+real articulation, randomized starts, ballistic rejected) across 3 seeds × EMA betas.
+
+| ckpt / horizon | raw clean (by seed) | raw ballistic | raw width_after | EMA β≥0.3 |
+|---|---|---|---|---|
+| v4a over-reg, 240 steps | `0.27` `[0.7,0.1,0.0]` | `0.13` | `0.63` | β→**no fold** (0.68) |
+| v4b v3-recipe, 240 steps | `0.067` `[0.2,0,0]` | `0.10` | `0.659` | β→**no fold** (0.68) |
+| **v4b v3-recipe, 340 steps (v4c)** | **`0.40` `[0.7,0.5,0.0]`** | `0.30` | `0.599` | β→**no fold** (0.68) |
+
+- **Horizon matters** but doesn't fix it: the V17 demos are `~272-301` steps, so the 240-step
+  eval cut the slow policy off mid-fold (raw clean `0.067`). Extending to 340 steps recovered
+  it partially (raw clean `0.40`, and deep when it works: `min_width_after 0.42`).
+- **v4 still UNDERPERFORMS v3** (v3: clean `~0.75`, width `~0.58`, ballistic `~0.22`). The
+  deep-SLOW demos yield a policy that is (a) sluggish (needs a longer horizon), (b)
+  high-variance across seeds (seed `5050` folds NOTHING: width `0.68`), (c) MORE ballistic
+  when it does fold (`0.30`), and (d) completely killed by any EMA filter (over-slow policy +
+  lag → no motion). Best beta = `0.00` (raw); all filters over-damped.
+- `robust_autonomous_so101_folding_validated = false`. Targets (clean≥0.8, ballistic<0.15,
+  width<0.55) NOT met.
+
+**Bottom line (honest): the V17 deep-slow experiment is a NEGATIVE result for robustness. V3
+(the V16-demo policy: clean ~0.75, width ~0.58) remains the best VALIDATED state-reactive
+policy.** Deeper demos alone, made SLOW, hurt closed-loop BC more than they helped depth.
+
+### V17 / v4 exact next step
+
+Keep V3 as the deployed policy. To get deep AND robust: (a) collect MODERATE-speed deep demos
+(drag `0.24-0.28 m` over `~140-160` steps — deep but DECISIVE, not slow), so the policy is
+both deep and fast enough to finish in a normal horizon; (b) or go beyond plain BC — DAgger or
+a learned residual over the scripted deep fold to fix the off-distribution seeds; (c) match the
+eval horizon to the demo length; (d) drop pure EMA filtering (it over-damps a slow policy).
