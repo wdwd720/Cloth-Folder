@@ -14,6 +14,24 @@ The `terafold-artifacts` Modal Volume exists.
 A Modal L40S GPU job successfully ran PyTorch CUDA.
 A Modal L40S Isaac Sim container successfully launched SimulationApp headless after resetting the container entrypoint.
 
+### Track B — training pipeline (PROVEN, non-Isaac path)
+
+`modal_apps/terafold_policy_training_v0.py` ran on a Modal L40S and:
+- confirmed `cuda_available=true`, `gpu_name=NVIDIA L40S`
+- unpacked the source-only git archive and imported the repo's own
+  `clean_towel_v4_common` (`build_training_dataset`, `PolicyMLP`) with no Isaac
+- trained the compact-state policy for 300 steps: loss 1.021 -> 0.000149,
+  action MAE 0.00107
+- wrote `/training_v0/training_v0_summary.json` and a checkpoint to the
+  `terafold-artifacts` volume (checkpoint is volume-only, never committed)
+
+Honest labeling: `dataset_source=generated_rect_grid_fallback`,
+`synthetic_or_real=synthetic`, `robot_contact_data_used=false`. This proves
+training INFRASTRUCTURE only. It is NOT a robot-contact folding policy. The
+remaining data blocker is that no robot-contact demonstration dataset exists,
+and real robot-contact policy training requires proven cloth/rigid contact
+transfer first.
+
 ## Not proven yet
 
 Isaac Sim headless on Modal has passed the first smoke test.
