@@ -363,6 +363,8 @@ def create_standalone_so101_clean_towel_scene(
     clean_usd_path: Path = CLEAN_TOWEL_USD_PATH,
     towel_translation: tuple[float, float, float] = (0.0, 0.0, 0.02),
     pre_reset_spawn=None,
+    left_base: tuple[float, float, float] | None = None,
+    right_base: tuple[float, float, float] | None = None,
 ) -> StandaloneSo101CleanTowelScene:
     """Build the standalone SO-101 + clean-towel scene.
 
@@ -398,8 +400,11 @@ def create_standalone_so101_clean_towel_scene(
 
     left_cfg = SO101_FOLLOWER_CFG.replace(prim_path="/World/Left_Robot")
     right_cfg = SO101_FOLLOWER_CFG.replace(prim_path="/World/Right_Robot")
-    left_cfg.init_state.pos = (-0.75, -0.55, 0.10)
-    right_cfg.init_state.pos = (0.75, -0.55, 0.10)
+    # Optional base repositioning (V13): the default ±0.75 m bases cannot reach a
+    # centered stable towel; a V13 caller moves one base near a towel edge. Default
+    # None keeps the proven V12 layout unchanged.
+    left_cfg.init_state.pos = tuple(left_base) if left_base is not None else (-0.75, -0.55, 0.10)
+    right_cfg.init_state.pos = tuple(right_base) if right_base is not None else (0.75, -0.55, 0.10)
     left_arm = Articulation(left_cfg)
     right_arm = Articulation(right_cfg)
 

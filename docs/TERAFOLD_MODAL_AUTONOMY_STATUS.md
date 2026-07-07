@@ -12,7 +12,9 @@ _Autonomous Modal readiness report. Honest evidence only._
   `terafold_modal_isaac45_contact_v10.py` (V10 mass), `_contact_v11.py` (V11
   physics-drive SOLVE), `terafold_modal_isaac45_so101_v12.py` (V12 SO-101 port),
   `terafold_modal_isaac45_so101_v12_isolated.py` (**V12 ISOLATED — RL packaging
-  blocker SOLVED + SO-101 contact transfer SOLVED**),
+  blocker SOLVED + SO-101 proxy contact transfer SOLVED**),
+  `terafold_modal_isaac45_so101_v13.py` (**V13 — real SO-101 ARTICULATION reach +
+  contact; fold not yet achieved**),
   `terafold_policy_training_v2_robot_contact.py` (gated, skipped)
 
 ## Headline
@@ -24,9 +26,16 @@ _Autonomous Modal readiness report. Honest evidence only._
   blocker is fixed and the physics-drive test now runs on the real SO-101 scene:
   a physics-driven gripper-contact proxy folds the towel, edge `0.093 m`, width
   `0.68 → 0.62`; teleport is inert. See "V12 ISOLATED" below.)
-- `robot_contact_data_ready = false` (no real robot-joint-action contact demos —
-  the fold is proxy-driven with SYNTHETIC joint labels; V6 arm reach/IK is not on
-  Modal, so no true (state, joint_action) demos exist yet)
+- `so101_articulation_reach_solved = true` (**V13** — the REAL SO-101 arm, driven
+  by physics-resolved joint position targets, reaches a towel edge: best jaw-to-edge
+  `0.0285 m`; and a jaw-attached contact patch touches the cloth and imparts a real
+  particle-velocity spike vs an inert baseline — the arm-drive contact MECHANISM works)
+- `so101_articulation_fold_solved = false` (**V13** — 3 drag-tuning attempts plateaued
+  at `~8 mm` edge displacement with no width reduction: the real arm reaches+contacts
+  but cannot yet drag/fold the stiff towel. See "V13" below.)
+- `robot_contact_data_ready = false` (no real robot-joint-action contact demos: the
+  proxy fold uses SYNTHETIC labels, and the real-arm fold is not yet achieved, so no
+  valid (state, joint_action, contact) demos exist)
 - `final_robot_contact_policy_training_ready = false` (Training v2 honestly
   SKIPPED; no fake robot-contact training)
 
@@ -345,3 +354,70 @@ fingertip-point contact would need parameter/geometry tuning to fold.
 **Exact next step:** run the V6 SO-101 reach/IK search on Modal, drive the ARM
 articulation (not a proxy) to fold, and record REAL `(state, joint_action)`
 contact demos → then `training_v2_robot_contact` with `robot_contact_data_used=true`.
+
+## V13 — real SO-101 ARTICULATION reach + contact (fold not yet achieved)
+
+`modal_apps/terafold_modal_isaac45_so101_v13.py` + `scripts/tera/*_v13.py` execute
+the V12 "exact next step" on the proven V12-isolated environment (RL stubs + h5py +
+one SimulationApp per container + single-reset build order). Each stage is its own
+container; state is shared only via the `terafold-artifacts` volume.
+Final artifact: `/artifacts/contact_v13/contact_v13_articulation_summary.json`.
+
+The drive is 100% **physics-resolved articulation** — `apply_action_step` =
+`set_joint_position_target → write_data_to_sim → sim.step → update(dt)` — NOT a USD
+teleport, NOT a free proxy, NOT particle writes.
+
+### What V13 SOLVED
+
+1. **Articulation reach.** `search_so101_articulation_reach_v13` (reuses the V6
+   candidate search: warm-start + Latin-hypercube joint actions, each applied via
+   `apply_action_step`, measuring the jaw body vs the towel edge centers). With the
+   towel at the centered stable rest and ONE arm base repositioned near an edge
+   (`right_base = (0.42, −0.28, 0.02)`; the default ±0.75 m bases cannot reach a
+   centered towel), the REAL right arm reaches the right edge:
+   `reachable_edge_found = true`, best jaw-to-edge-center distance **0.0285 m**.
+2. **Arm-driven contact MECHANISM.** `test_so101_articulation_contact_fold_v13`
+   attaches a contact patch as a CHILD of the jaw link
+   (`/World/Right_Robot/jaw/v13_contact_patch`) via the `pre_reset_spawn` hook, so it
+   is part of the jaw's rigid body and moves ONLY as the physics-resolved articulation
+   moves it (the task explicitly allows a "contact patch"; only FREE proxy motion is
+   disallowed). This bridges the known "raw jaw under-contacts" gap: the patch
+   **touches** the cloth (`actual_touch = 0.0 m`) and imparts a **real particle-velocity
+   spike** (`particle_velocity_peak 0.62` vs the inert no-contact baseline's `0.0`).
+   The raw jaw alone could not do even this. `articulation_contact_mechanism_works = true`.
+
+### What V13 did NOT achieve (honest)
+
+`so101_articulation_fold_solved = false`. Three drag-tuning attempts — patch radius
+`0.04` / `0.06`, then a **cloth-aware** drag search (run the full default→contact→drag
+for 16 candidate right-arm joint deltas and keep the one that moves the CLOTH most) —
+all plateaued:
+
+| attempt | patch r | drag search | best edge_disp | width | verdict |
+|---|---|---|---|---|---|
+| 1 | 0.04 | jaw-inward, single joint | 0.0056 m | 0.68→0.68 | no fold |
+| 2 | 0.06 | jaw-inward, ±0.9 | 0.0030 m | 0.68→0.68 | no fold |
+| 3 | 0.05 | **cloth-aware**, 16 cand. | 0.0064 m (best cand. 0.0083) | 0.68→0.68 | no fold |
+
+The patch **slides over / presses** the stiff towel (stretch stiffness `10000`) rather
+than **dragging** its edge inward: local deformation reaches ~19 mm but the edge-center
+band moves only ~8 mm (threshold `> 20 mm`), with no width reduction. So the real arm
+reaches + contacts + transfers momentum, but does not fold.
+
+### Consequences (Training v2 gate)
+
+- `robot_contact_data_ready = false`: `run_so101_real_contact_demo_collection_v13`
+  records demos with the REAL commanded joint targets as `action`, but it is GATED on a
+  valid arm-driven fold; with no fold, it produces no valid robot-contact demos.
+- `final_robot_contact_policy_training_ready = false`: **Training v2 honestly SKIPPED**
+  (`terafold_policy_training_v2_robot_contact.py` not run). No fake robot-contact training.
+
+### Exact next step
+
+Beyond drag tuning, the promising approaches (the reach + physics-resolved drive +
+jaw-attached patch are all proven): (a) **hook the edge from OUTSIDE** — reach a
+pre-edge pose just beyond the edge, then drag inward to catch the edge lip, the way the
+V12 proxy folded (via `outside_margin`), instead of pressing on the edge centre; and/or
+(b) close the SO-101 **gripper** to pinch the edge then lift/drag; and/or (c) soften the
+towel authoring. Only if one of these yields a valid arm-driven fold do real demos +
+Training v2 become authorized.
