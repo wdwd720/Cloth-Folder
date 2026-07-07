@@ -12,10 +12,12 @@ Brev is now a frozen historical Isaac VM unless Isaac-on-Modal fails and we need
 Modal is authenticated in the terarobotics workspace.
 The `terafold-artifacts` Modal Volume exists.
 A Modal L40S GPU job successfully ran PyTorch CUDA.
+A Modal L40S Isaac Sim container successfully launched SimulationApp headless after resetting the container entrypoint.
 
 ## Not proven yet
 
-Isaac Sim / Isaac Lab headless on Modal has not been proven.
+Isaac Sim headless on Modal has passed the first smoke test.
+Isaac Lab / LeIsaac repo scripts on Modal have not been proven yet.
 Autonomous robot-contact towel folding has not been proven.
 The clean towel rigid-contact issue is not solved.
 
@@ -50,5 +52,5 @@ Use Modal Volume or external storage for generated artifacts.
 
 ## Next step
 
-Create an Isaac-on-Modal smoke test as an experimental scaffold only.
-The first Isaac test must answer whether Modal can run the Isaac/Isaac Lab environment headless on an RTX-capable GPU.
+Run the next Isaac-on-Modal smoke test against the actual LeIsaac/Tera scripts.
+The next test must answer whether Modal can run our repo's Isaac scripts, not just launch Isaac Sim.
